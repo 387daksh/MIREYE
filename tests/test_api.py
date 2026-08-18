@@ -1,0 +1,95 @@
+import pytest
+from fastapi.testclient import TestClient
+from app.main import app
+
+client = TestClient(app)
+
+
+def test_health_check():
+    response = client.get("/health")
+    assert response.status_code == 200
+    assert response.json()["status"] == "healthy"
+
+
+def test_meta_fields():
+    response = client.get("/v1/meta/fields")
+    assert response.status_code == 200
+    data = response.json()
+    assert "total_fields" in data
+    assert len(data["fields"]) > 0
+
+
+def test_screen_parcels():
+    payload = {
+        "min_acreage": 20.0,
+        "max_slope_pct": 15.0,
+        "limit": 5,
+        "apply_confidence_scoring": True,
+    }
+    response = client.post("/v1/screen", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert "candidates_found" in data
+    assert "shortlist" in data
+    if data["candidates_found"] > 0:
+        assert "confidence_score" in data["shortlist"][0]
+
+
+def test_ask_parcel():
+    payload = {
+        "lat": 32.5,
+        "lng": -97.0,
+        "preset": "site_selection",
+    }
+    response = client.post("/v1/ask", json=payload)
+    assert response.status_code == 200
+    data = response.json()
+    assert "dossier" in data
+    assert "confidence" in data
+    assert data["dossier"]["ok"] is True
+
+
+def test_grid_capacity():
+    response = client.get("/v1/grid?lat=32.5&lng=-97.0&target_capacity_mw=75.0")
+    assert response.status_code == 200
+    data = response.json()
+    assert "substation" in data
+    assert "feasibility" in data
+
+
+def test_workspace_lifecycle():
+    import time
+    ws_id = f"ws_api_test_{int(time.time() * 1000)}"
+
+    # 1. Open
+    r1 = client.post("/v1/workspace/open", json={"workspace_id": ws_id, "label": "API Test"})
+    assert r1.status_code == 200
+
+    # 2. Observe
+    obs_payload = {
+        "workspace_id": ws_id,
+        "local_key": "PCL-000005",
+        "status": "shortlisted",
+        "justification": "Optimal wind speed and flat slope",
+        "lat": 32.5,
+        "lng": -97.0,
+    }
+    r2 = client.post("/v1/workspace/observe", json=obs_payload)
+    assert r2.status_code == 200
+    assert r2.json()["version"] == 1
+
+    # 3. State
+    r3 = client.get(f"/v1/workspace/{ws_id}/state")
+    assert r3.status_code == 200
+    state = r3.json()
+    assert len(state["shortlisted"]) == 1
+
+    # 4. Invalidate
+    r4 = client.post(f"/v1/workspace/{ws_id}/invalidate")
+    assert r4.status_code == 200
+    assert "stale_fields" in r4.json()
+
+    # 5. History
+    r5 = client.get(f"/v1/workspace/{ws_id}/history/PCL-000005")
+    assert r5.status_code == 200
+    assert len(r5.json()["history"]) == 1
