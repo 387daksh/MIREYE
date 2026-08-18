@@ -14,8 +14,11 @@ Exposes the unified spatial core:
 """
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.discovery.confidence import rank_shortlist_by_confidence, score_site
@@ -31,6 +34,18 @@ app = FastAPI(
     description="Transforms Mireye from a single-point verification tool into an autonomous enterprise site origination engine.",
     version="1.0.0",
 )
+
+STATIC_DIR = Path(__file__).resolve().parent / "static"
+if STATIC_DIR.exists():
+    app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+
+@app.get("/")
+async def serve_index():
+    index_file = STATIC_DIR / "index.html"
+    if index_file.exists():
+        return FileResponse(index_file)
+    return {"status": "ok", "message": "Mireye Platform API"}
 
 # Global core singletons
 mireye_client = MireyeClient()
@@ -161,7 +176,9 @@ async def ask_parcel(req: AskRequest):
     )
 
     if not dossier.get("ok", True):
-        raise HTTPException(status_code=404, detail=dossier.get("error", "Parcel not found"))
+        error = dossier.get("error", {"code": "not_found", "message": "Parcel not found"})
+        status_code = {"invalid_location": 400, "ambiguous_address": 409}.get(error.get("code"), 404)
+        raise HTTPException(status_code=status_code, detail=error)
 
     confidence_breakdown = score_site(dossier.get("fields", {}))
     return {

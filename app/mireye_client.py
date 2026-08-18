@@ -107,13 +107,35 @@ class MireyeClient:
                 """
             elif address:
                 # If address contains PCL-XXXXXX
-                query = f"""
+                df = con.execute(
+                    f"""
                     SELECT * FROM '{PARQUET_FILE.as_posix()}'
-                    WHERE parcel_id ILIKE '%{address.strip()}%'
-                    LIMIT 1
-                """
+                    WHERE parcel_id ILIKE ?
+                    LIMIT 2
+                    """,
+                    [f"%{address.strip()}%"],
+                ).df()
+                if len(df) > 1:
+                    return {
+                        "ok": False,
+                        "error": {
+                            "code": "ambiguous_address",
+                            "message": "Address matched multiple parcels. Choose one candidate and retry.",
+                            "candidates": [
+                                {
+                                    "parcel_id": str(r["parcel_id"]),
+                                    "lat": float(r["lat"]),
+                                    "lng": float(r["lon"]),
+                                }
+                                for r in df.to_dict(orient="records")
+                            ],
+                        },
+                    }
+                if df.empty:
+                    return None
+                return df.to_dict(orient="records")[0]
             else:
-                query = f"SELECT * FROM '{PARQUET_FILE.as_posix()}' LIMIT 1"
+                return None
 
             df = con.execute(query).df()
             if df.empty:
@@ -131,6 +153,8 @@ class MireyeClient:
                 "lng": lng,
                 "error": {"code": "not_found", "message": "No parcel matched the coordinates or identifier."},
             }
+        if row.get("ok") is False:
+            return row
 
         target_fields = fields or (PRESET_FIELDS.get(preset or "site_selection", PRESET_FIELDS["site_selection"]))
         field_records = {}
@@ -182,6 +206,21 @@ class MireyeClient:
         preset: str | None = None,
     ) -> dict:
         """Fetch dossier facts for a single parcel."""
+        if (lat is None) != (lng is None):
+            return {
+                "ok": False,
+                "lat": lat,
+                "lng": lng,
+                "error": {"code": "invalid_location", "message": "Latitude and longitude must be provided together."},
+            }
+        if lat is None and lng is None and not address:
+            return {
+                "ok": False,
+                "lat": lat,
+                "lng": lng,
+                "error": {"code": "invalid_location", "message": "Must provide lat/lng coordinates or address."},
+            }
+
         if self.mode == "live":
             payload = {"lat": lat, "lng": lng, "address": address, "fields": fields, "preset": preset}
             res = await self._request("POST", "/v1/fetch", json_body={k: v for k, v in payload.items() if v is not None})

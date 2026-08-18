@@ -43,49 +43,62 @@ class SpatialDiscovery:
             return []
 
         clauses = ["1=1"]
+        params: list[Any] = [self.parquet_path.as_posix()]
         if min_lat is not None:
-            clauses.append(f"lat >= {min_lat}")
+            clauses.append("lat >= ?")
+            params.append(min_lat)
         if max_lat is not None:
-            clauses.append(f"lat <= {max_lat}")
+            clauses.append("lat <= ?")
+            params.append(max_lat)
         if min_lng is not None:
-            clauses.append(f"lon >= {min_lng}")
+            clauses.append("lon >= ?")
+            params.append(min_lng)
         if max_lng is not None:
-            clauses.append(f"lon <= {max_lng}")
+            clauses.append("lon <= ?")
+            params.append(max_lng)
         if min_acreage is not None:
-            clauses.append(f"acreage >= {min_acreage}")
+            clauses.append("acreage >= ?")
+            params.append(min_acreage)
         if max_acreage is not None:
-            clauses.append(f"acreage <= {max_acreage}")
+            clauses.append("acreage <= ?")
+            params.append(max_acreage)
         if max_slope_pct is not None:
-            clauses.append(f"slope_pct <= {max_slope_pct}")
+            clauses.append("slope_pct <= ?")
+            params.append(max_slope_pct)
         if flood_zones:
-            zones_str = ", ".join(f"'{z}'" for z in flood_zones)
-            clauses.append(f"flood_zone IN ({zones_str})")
+            clauses.append(f"flood_zone IN ({', '.join('?' for _ in flood_zones)})")
+            params.extend(flood_zones)
         if max_flood_risk_score is not None:
-            clauses.append(f"flood_risk_score <= {max_flood_risk_score}")
+            clauses.append("flood_risk_score <= ?")
+            params.append(max_flood_risk_score)
         if min_substation_capacity_mw is not None:
-            clauses.append(f"substation_capacity_mw >= {min_substation_capacity_mw}")
+            clauses.append("substation_capacity_mw >= ?")
+            params.append(min_substation_capacity_mw)
         if max_distance_to_substation_km is not None:
-            clauses.append(f"distance_to_substation_km <= {max_distance_to_substation_km}")
+            clauses.append("distance_to_substation_km <= ?")
+            params.append(max_distance_to_substation_km)
         if max_queue_depth is not None:
-            clauses.append(f"interconnection_queue_depth <= {max_queue_depth}")
+            clauses.append("interconnection_queue_depth <= ?")
+            params.append(max_queue_depth)
         if zoning_renewable_only:
             clauses.append("zoning_renewable_permitted = true")
         if owner_types:
-            owners_str = ", ".join(f"'{o}'" for o in owner_types)
-            clauses.append(f"owner_type IN ({owners_str})")
+            clauses.append(f"owner_type IN ({', '.join('?' for _ in owner_types)})")
+            params.extend(owner_types)
+        params.append(limit)
 
         where_clause = " AND ".join(clauses)
-        query = f"""
+        query = """
             SELECT *
-            FROM '{self.parquet_path.as_posix()}'
+            FROM read_parquet(?)
             WHERE {where_clause}
             ORDER BY acreage DESC
-            LIMIT {limit}
-        """
+            LIMIT ?
+        """.format(where_clause=where_clause)
 
         con = duckdb.connect()
         try:
-            df = con.execute(query).df()
+            df = con.execute(query, params).df()
             if df.empty:
                 return []
 
