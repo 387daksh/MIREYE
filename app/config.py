@@ -14,6 +14,5 @@ DATA_MODE = "live" if MIREYE_API_KEY else "local"
 PARQUET_DIR = ROOT / "app" / "data" / "parquet"
 WORKSPACE_DB = ROOT / "app" / "data" / "workspaces.db"
 
-# Fixes bug (C) from the ideation doc: instead of silently dropping fields
-# past this cap, we paginate and tell the caller explicitly.
+
 MAX_FIELDS_PER_REQUEST = 15
