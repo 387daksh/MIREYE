@@ -256,16 +256,23 @@ class MireyeClient:
 
     async def fetch_quote(
         self,
-        locations: list[dict],
+        locations: int | list[dict] = 1,
         fields: list[str] | None = None,
         preset: str | None = None,
     ) -> dict:
-        """Quote pricing and credit cost for a proposed batch fetch."""
+        """Quote pricing for one fetch or a batch without sending locations."""
+        location_count = len(locations) if isinstance(locations, list) else locations
+        if not isinstance(location_count, int) or not 1 <= location_count <= 25:
+            raise ValueError("locations must be a count from 1 to 25 or a list of up to 25 locations")
         if self.mode == "live":
-            payload = {"locations": locations, "fields": fields, "preset": preset}
-            return await self._request("POST", "/v1/fetch/quote", json_body=payload)
+            payload = {"locations": location_count, "fields": fields, "preset": preset}
+            return await self._request(
+                "POST",
+                "/v1/fetch/quote",
+                json_body={k: v for k, v in payload.items() if v is not None},
+            )
 
-        n_locs = len(locations)
+        n_locs = location_count
         n_fields = len(fields) if fields else len(PRESET_FIELDS.get(preset or "site_selection", []))
         return {
             "locations_count": n_locs,
@@ -293,16 +300,31 @@ class MireyeClient:
             "presets": list(PRESET_FIELDS.keys()),
         }
 
-    async def lookup(self, address: str) -> dict:
-        """Verify address clarity without silent guessing."""
+    async def lookup(
+        self,
+        address: str | None = None,
+        *,
+        input: str | None = None,
+        kind: str | None = None,
+        include_parcel: bool = True,
+    ) -> dict:
+        """Resolve an address, APN, or coordinate input without silent guessing."""
+        query = input if input is not None else address
+        if not query:
+            raise ValueError("lookup requires an input value")
         if self.mode == "live":
-            return await self._request("POST", "/v1/lookup", json_body={"address": address})
+            payload = {"input": query, "kind": kind, "include_parcel": include_parcel}
+            return await self._request(
+                "POST",
+                "/v1/lookup",
+                json_body={k: v for k, v in payload.items() if v is not None},
+            )
 
         return {
-            "query": address,
+            "query": query,
             "disposition": "exact_match",
             "candidates": [
-                {"address": address, "lat": 32.7767, "lng": -96.7970, "confidence": 0.98, "parcel_id": "PCL-000100"}
+                {"address": query, "lat": 32.7767, "lng": -96.7970, "confidence": 0.98, "parcel_id": "PCL-000100"}
             ],
         }
 

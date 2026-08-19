@@ -15,7 +15,7 @@ Exposes the unified spatial core:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -26,6 +26,10 @@ from app.discovery.screen import DiscoveryEngine, FilterRule
 from app.discovery.spatial import SpatialDiscovery
 from app.grid.ici import ICIEngine
 from app.mireye_client import MireyeClient
+from app.sandbox_agent import ModelUnavailableError, SandboxAgent, ToolValidationError
+from app.sandbox_evaluator import SceneValidationError, evaluate_site
+from app.sandbox_scenarios import ScenarioError, ScenarioService
+from app.sandbox import ConfirmationRequired, MireyeUnavailableError, ParcelIdentityError, SandboxError, SiteSnapshotService
 from app.workspace.engine import WorkspaceEngine
 from app.workspace.store import WorkspaceStore
 
@@ -47,10 +51,21 @@ async def serve_index():
         return FileResponse(index_file)
     return {"status": "ok", "message": "Mireye Platform API"}
 
+
+@app.get("/sandbox/{snapshot_id}")
+async def serve_sandbox(snapshot_id: str):
+    sandbox_file = STATIC_DIR / "sandbox.html"
+    if sandbox_file.exists():
+        return FileResponse(sandbox_file)
+    raise HTTPException(status_code=404, detail="Sandbox frontend is unavailable.")
+
 # Global core singletons
 mireye_client = MireyeClient()
 workspace_store = WorkspaceStore()
 workspace_engine = WorkspaceEngine(store=workspace_store, client=mireye_client)
+sandbox_service = SiteSnapshotService(store=workspace_store, client=mireye_client)
+scenario_service = ScenarioService(workspace_store)
+sandbox_agent = SandboxAgent(scenarios=scenario_service)
 spatial_discovery = SpatialDiscovery()
 ici_engine = ICIEngine()
 discovery_engine = DiscoveryEngine(client=mireye_client)
@@ -101,6 +116,57 @@ class WorkspaceObserveRequest(BaseModel):
     address: str | None = None
 
 
+class SandboxResolveRequest(BaseModel):
+    input: str | None = None
+    kind: Literal["address", "apn", "coord"] | None = None
+    lat: float | None = None
+    lng: float | None = None
+
+
+class SandboxQuoteRequest(BaseModel):
+    lat: float
+    lng: float
+
+
+class SandboxSnapshotRequest(BaseModel):
+    workspace_id: str
+    lat: float
+    lng: float
+    confirmed: bool = False
+
+
+class SandboxEvaluationRequest(BaseModel):
+    scene_state: dict[str, Any]
+    requested_constraints: list[dict[str, Any]]
+
+
+class SandboxChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    session_id: str = Field(min_length=1, max_length=128)
+    workspace_id: str | None = None
+    scenario_id: str | None = None
+
+
+class SandboxScenarioCreateRequest(BaseModel):
+    workspace_id: str
+    user_intent: str = ""
+    scene_state: dict[str, Any] | None = None
+    requested_constraints: list[dict[str, Any]] | None = None
+    model_id: str | None = None
+
+
+class SandboxScenarioBranchRequest(BaseModel):
+    user_intent: str = ""
+    model_id: str | None = None
+
+
+class SandboxCompareRequest(BaseModel):
+    left_scenario_id: str
+    right_scenario_id: str
+    left_revision: int | None = Field(default=None, ge=1)
+    right_revision: int | None = Field(default=None, ge=1)
+
+
 # -----------------------------------------------------------------------------
 # API Routes
 # -----------------------------------------------------------------------------
@@ -121,6 +187,148 @@ async def get_usage():
 @app.get("/v1/meta/fields")
 async def get_meta_fields():
     return await mireye_client.meta_fields()
+
+
+@app.post("/v1/sandbox/site/resolve")
+async def resolve_sandbox_site(req: SandboxResolveRequest):
+    try:
+        result = await sandbox_service.resolve(
+            input=req.input,
+            kind=req.kind,
+            lat=req.lat,
+            lng=req.lng,
+        )
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if result["status"] == "ambiguous":
+        raise HTTPException(status_code=409, detail=result)
+    if result["status"] == "not_found":
+        raise HTTPException(status_code=404, detail=result)
+    return result
+
+
+@app.post("/v1/sandbox/site/quote")
+async def quote_sandbox_site(req: SandboxQuoteRequest):
+    try:
+        return await sandbox_service.quote(lat=req.lat, lng=req.lng)
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/site/snapshots")
+async def create_sandbox_snapshot(req: SandboxSnapshotRequest):
+    try:
+        return await sandbox_service.create_snapshot(
+            workspace_id=req.workspace_id,
+            lat=req.lat,
+            lng=req.lng,
+            confirmed=req.confirmed,
+        )
+    except ConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ParcelIdentityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/site/snapshots/{snapshot_id}/scene")
+async def get_sandbox_scene(snapshot_id: str):
+    try:
+        return sandbox_service.scene_state(snapshot_id)
+    except SandboxError as exc:
+        status_code = 404 if str(exc) == "SiteSnapshot not found." else 400
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/site/snapshots/{snapshot_id}")
+async def get_sandbox_snapshot(snapshot_id: str):
+    snapshot = sandbox_service.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
+    return snapshot
+
+
+@app.post("/v1/sandbox/site/{snapshot_id}/evaluate")
+async def evaluate_sandbox_site(snapshot_id: str, req: SandboxEvaluationRequest):
+    snapshot = sandbox_service.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
+    try:
+        return evaluate_site(snapshot, req.scene_state, req.requested_constraints)
+    except SceneValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/{snapshot_id}/chat")
+async def chat_with_sandbox(snapshot_id: str, req: SandboxChatRequest):
+    snapshot = sandbox_service.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
+    try:
+        return await sandbox_agent.chat(snapshot, req.session_id, req.message, workspace_id=req.workspace_id, scenario_id=req.scenario_id)
+    except ModelUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except ToolValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except ScenarioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/{snapshot_id}/scenarios")
+async def create_sandbox_scenario(snapshot_id: str, req: SandboxScenarioCreateRequest):
+    snapshot = sandbox_service.get_snapshot(snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
+    try:
+        scene_state = req.scene_state or sandbox_service.scene_state(snapshot_id)
+        return scenario_service.create(
+            snapshot, workspace_id=req.workspace_id, user_intent=req.user_intent,
+            scene_state=scene_state, requested_constraints=req.requested_constraints, model_id=req.model_id,
+        )
+    except ScenarioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/scenarios/{scenario_id}/branch")
+async def branch_sandbox_scenario(scenario_id: str, req: SandboxScenarioBranchRequest):
+    try:
+        return scenario_service.branch(scenario_id, user_intent=req.user_intent, model_id=req.model_id)
+    except ScenarioError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "Scenario was not found." else 400, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/scenarios/{scenario_id}")
+async def get_sandbox_scenario(scenario_id: str, revision: int | None = Query(default=None, ge=1)):
+    try:
+        return scenario_service.get(scenario_id, revision)
+    except ScenarioError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/scenarios/{scenario_id}/revisions")
+async def list_sandbox_scenario_revisions(scenario_id: str):
+    try:
+        return scenario_service.list_revisions(scenario_id)
+    except ScenarioError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/compare")
+async def compare_sandbox_scenarios(req: SandboxCompareRequest):
+    try:
+        return scenario_service.compare(
+            req.left_scenario_id, req.right_scenario_id,
+            left_revision=req.left_revision, right_revision=req.right_revision,
+        )
+    except ScenarioError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/v1/screen")

@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Mireye Site Sandbox</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
+  <link rel="stylesheet" href="/static/sandbox.css">
+</head>
+<body>
+  <div class="grid-background"></div>
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand-wrapper sandbox-brand" href="/" aria-label="Mireye home">
+        <span class="sandbox-mark">M</span>
+        <span class="brand-title">Mireye</span>
+        <span class="brand-tagline-badge">Site Sandbox</span>
+      </a>
+      <div class="sandbox-header-state">
+        <span class="sandbox-state observed">OBSERVED</span>
+        <span class="mono" id="snapshotState">LOADING SNAPSHOT</span>
+      </div>
+    </div>
+  </header>
+
+  <main class="app-main sandbox-main">
+    <section class="sandbox-toolbar" aria-label="Site snapshot summary">
+      <div>
+        <div class="sandbox-eyebrow">REAL PARCEL SNAPSHOT</div>
+        <h1 id="parcelTitle">Loading parcel</h1>
+        <p class="mono" id="parcelMeta">MIREYE-SOURCED GEOMETRY</p>
+      </div>
+      <div class="sandbox-origin-key" aria-label="Scene origin legend">
+        <span><i class="origin-dot observed-dot"></i>OBSERVED</span>
+        <span><i class="origin-dot derived-dot"></i>DERIVED</span>
+        <span><i class="origin-dot proposed-dot"></i>PROPOSED</span>
+      </div>
+    </section>
+
+    <section class="sandbox-layout">
+      <div class="sandbox-scene-panel">
+        <div id="sandboxMap" aria-label="3D parcel sandbox map"></div>
+        <div class="scene-chip scene-chip-top">CONCEPTUAL FLAT GROUND PLANE</div>
+        <div class="scene-chip scene-chip-bottom" id="cameraReadout">PITCH 55 | BEARING 0</div>
+        <div class="scene-legend">
+          <span><i class="legend-line observed-line"></i>Verified parcel</span>
+          <span><i class="legend-dot observed-dot"></i>Resolution point</span>
+          <span><i class="legend-block proposed-block"></i>Conceptual data center</span>
+        </div>
+        <div class="sandbox-error" id="sandboxError" hidden></div>
+      </div>
+
+      <aside class="sandbox-sidebar">
+        <section class="sandbox-panel">
+          <div class="sandbox-panel-heading">
+            <div>
+              <div class="sandbox-eyebrow">PROPOSED OBJECT</div>
+              <h2>Data Center</h2>
+            </div>
+            <span class="sandbox-state proposed">PROPOSED</span>
+          </div>
+          <div class="sandbox-form-grid">
+            <label>Capacity MW<input id="capacityMw" type="number" min="1" step="1" value="100"></label>
+            <label>Height m<input id="heightM" type="number" min="1" step="1" value="28"></label>
+            <label>Width m<input id="widthM" type="number" min="1" step="1" value="250"></label>
+            <label>Length m<input id="lengthM" type="number" min="1" step="1" value="350"></label>
+            <label class="sandbox-span-two">Rotation deg<input id="rotationDeg" type="number" min="0" max="359" step="1" value="0"></label>
+          </div>
+          <p class="sandbox-note">Conceptual dimensions only. No engineering or capacity claim is implied.</p>
+        </section>
+
+        <section class="sandbox-panel sandbox-demo-panel">
+          <div class="sandbox-panel-heading">
+            <div>
+              <div class="sandbox-eyebrow">DEMO</div>
+              <h2>Live Site State</h2>
+            </div>
+            <span class="sandbox-state observed">OBSERVED</span>
+          </div>
+          <div class="sandbox-demo-label">REAL PARCEL</div>
+          <dl class="sandbox-facts" id="snapshotFacts"></dl>
+          <div class="sandbox-demo-label">CURRENT SCENARIO</div>
+          <dl class="sandbox-facts" id="scenarioFacts"></dl>
+          <div class="sandbox-demo-label">SCENE LEGEND</div>
+          <div class="sandbox-origin-key sandbox-demo-legend">
+            <span><i class="origin-dot observed-dot"></i>OBSERVED</span>
+            <span><i class="origin-dot derived-dot"></i>DERIVED</span>
+            <span><i class="origin-dot proposed-dot"></i>PROPOSED</span>
+          </div>
+        </section>
+
+        <section class="sandbox-panel">
+          <div class="sandbox-panel-heading">
+            <div>
+              <div class="sandbox-eyebrow">SCENARIO</div>
+              <h2 id="scenarioTitle">Unsaved Session</h2>
+            </div>
+            <span class="sandbox-state derived" id="scenarioRevision">REV -</span>
+          </div>
+          <label class="sandbox-chat-input">Intent<input id="scenarioIntent" type="text" placeholder="Scenario A"></label>
+          <div class="sandbox-scenario-actions">
+            <button class="sandbox-chat-submit" id="scenarioSave" type="button">Save</button>
+            <button class="sandbox-chat-submit" id="scenarioBranch" type="button" disabled>Branch</button>
+          </div>
+          <label class="sandbox-chat-input">Scenario<select id="scenarioSelect"><option value="">Current session</option></select></label>
+          <label class="sandbox-chat-input">Compare with<select id="scenarioCompareSelect"><option value="">Choose scenario</option></select></label>
+          <button class="sandbox-chat-submit" id="scenarioCompare" type="button" disabled>Compare</button>
+          <div class="sandbox-evaluation" id="scenarioComparison" hidden></div>
+        </section>
+
+        <section class="sandbox-panel sandbox-chat-panel">
+          <div class="sandbox-panel-heading">
+            <div>
+              <div class="sandbox-eyebrow">SANDBOX AGENT</div>
+              <h2>Scenario Assistant</h2>
+            </div>
+            <span class="sandbox-state derived" id="chatState">READY</span>
+          </div>
+          <div class="sandbox-chat-response" id="chatResponse">Proposed objects are conceptual. Evaluation results are deterministic.</div>
+          <div class="sandbox-tool-trace" id="chatTrace" hidden></div>
+          <div class="sandbox-demo-prompts" aria-label="Example instructions">
+            <button type="button">Put a 100 MW data center here.</button>
+            <button type="button">Move it 200 meters north.</button>
+            <button type="button">Make it 120 m by 140 m.</button>
+            <button type="button">Rotate it 30 degrees.</button>
+            <button type="button">Does it fit?</button>
+            <button type="button">Create a second scenario at 150 MW.</button>
+            <button type="button">Compare the scenarios.</button>
+          </div>
+          <label class="sandbox-chat-input">Instruction<textarea id="chatMessage" rows="3" placeholder="Move it 200 meters north."></textarea></label>
+          <button class="sandbox-chat-submit" id="chatSubmit" type="button">Send</button>
+          <div class="sandbox-evaluation" id="chatEvaluation" hidden></div>
+        </section>
+      </aside>
+    </section>
+  </main>
+
+  <script src="/static/vendor/maplibre-gl.js"></script>
+  <script src="/static/sandbox.js"></script>
+</body>
+</html>

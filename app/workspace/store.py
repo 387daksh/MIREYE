@@ -66,8 +66,52 @@ class WorkspaceStore:
                     detected_at REAL NOT NULL
                 );
 
+                CREATE TABLE IF NOT EXISTS site_snapshots (
+                    snapshot_id TEXT PRIMARY KEY,
+                    workspace_id TEXT NOT NULL,
+                    parcel_id TEXT NOT NULL,
+                    identity_json TEXT NOT NULL,
+                    geometry_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    raw_response_json TEXT NOT NULL,
+                    raw_response_hash TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    request_hash TEXT NOT NULL,
+                    field_catalog_version TEXT NOT NULL,
+                    provider_metadata_json TEXT NOT NULL,
+                    observed_at REAL NOT NULL,
+                    expires_at REAL NOT NULL,
+                    created_at REAL NOT NULL,
+                    FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id)
+                );
+
+                CREATE TABLE IF NOT EXISTS scenario_versions (
+                    scenario_id TEXT NOT NULL,
+                    workspace_id TEXT NOT NULL,
+                    revision INTEGER NOT NULL,
+                    parent_scenario_id TEXT,
+                    site_snapshot_id TEXT NOT NULL,
+                    user_intent TEXT NOT NULL,
+                    scene_state_json TEXT NOT NULL,
+                    requested_constraints_json TEXT NOT NULL,
+                    evaluation_json TEXT NOT NULL,
+                    state_hash TEXT NOT NULL,
+                    geometry_engine_version TEXT NOT NULL,
+                    proposal_strategy_version TEXT NOT NULL,
+                    model_id TEXT,
+                    tool_schema_version TEXT NOT NULL,
+                    accepted_tool_calls_json TEXT NOT NULL,
+                    created_at REAL NOT NULL,
+                    PRIMARY KEY (scenario_id, revision),
+                    FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id),
+                    FOREIGN KEY (site_snapshot_id) REFERENCES site_snapshots(snapshot_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_obs_ws_key ON observations(workspace_id, local_key);
                 CREATE INDEX IF NOT EXISTS idx_obs_ws_created ON observations(workspace_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_snapshots_workspace_created ON site_snapshots(workspace_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_scenarios_workspace_created ON scenario_versions(workspace_id, created_at);
+                CREATE INDEX IF NOT EXISTS idx_scenarios_snapshot_created ON scenario_versions(site_snapshot_id, created_at);
             """)
 
     def create_workspace(self, workspace_id: str, label: str = "") -> None:
@@ -96,6 +140,128 @@ class WorkspaceStore:
                 """,
                 (workspace_id, local_key, site_id, time.time()),
             )
+
+    def create_site_snapshot(self, snapshot: dict) -> None:
+        """Persist an immutable real-site snapshot. Existing snapshots are never updated."""
+        self.create_workspace(snapshot["workspace_id"])
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO site_snapshots (
+                    snapshot_id, workspace_id, parcel_id, identity_json, geometry_json,
+                    evidence_json, raw_response_json, raw_response_hash, request_json,
+                    request_hash, field_catalog_version, provider_metadata_json,
+                    observed_at, expires_at, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    snapshot["snapshot_id"],
+                    snapshot["workspace_id"],
+                    snapshot["parcel_identity"]["parcel_id"],
+                    json.dumps(snapshot["parcel_identity"], sort_keys=True),
+                    json.dumps(snapshot["geometry"], sort_keys=True),
+                    json.dumps(snapshot["evidence"], sort_keys=True),
+                    json.dumps(snapshot["raw_response"], sort_keys=True),
+                    snapshot["raw_response_hash"],
+                    json.dumps(snapshot["request"], sort_keys=True),
+                    snapshot["request_hash"],
+                    snapshot["field_catalog_version"],
+                    json.dumps(snapshot["provider_metadata"], sort_keys=True),
+                    snapshot["observed_at"],
+                    snapshot["expires_at"],
+                    snapshot["created_at"],
+                ),
+            )
+
+    def get_site_snapshot(self, snapshot_id: str) -> dict | None:
+        with self._get_conn() as conn:
+            row = conn.execute(
+                """
+                SELECT snapshot_id, workspace_id, identity_json, geometry_json, evidence_json,
+                       raw_response_json, raw_response_hash, request_json, request_hash,
+                       field_catalog_version, provider_metadata_json, observed_at, expires_at,
+                       created_at
+                FROM site_snapshots WHERE snapshot_id = ?
+                """,
+                (snapshot_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return {
+            "snapshot_id": row["snapshot_id"],
+            "workspace_id": row["workspace_id"],
+            "parcel_identity": json.loads(row["identity_json"]),
+            "geometry": json.loads(row["geometry_json"]),
+            "evidence": json.loads(row["evidence_json"]),
+            "raw_response": json.loads(row["raw_response_json"]),
+            "raw_response_hash": row["raw_response_hash"],
+            "request": json.loads(row["request_json"]),
+            "request_hash": row["request_hash"],
+            "field_catalog_version": row["field_catalog_version"],
+            "provider_metadata": json.loads(row["provider_metadata_json"]),
+            "observed_at": row["observed_at"],
+            "expires_at": row["expires_at"],
+            "created_at": row["created_at"],
+        }
+
+    def create_scenario_version(self, scenario: dict) -> None:
+        self.create_workspace(scenario["workspace_id"])
+        with self._get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO scenario_versions (
+                    scenario_id, workspace_id, revision, parent_scenario_id,
+                    site_snapshot_id, user_intent, scene_state_json,
+                    requested_constraints_json, evaluation_json, state_hash,
+                    geometry_engine_version, proposal_strategy_version, model_id,
+                    tool_schema_version, accepted_tool_calls_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scenario["scenario_id"], scenario["workspace_id"], scenario["revision"],
+                    scenario.get("parent_scenario_id"), scenario["site_snapshot_id"], scenario["user_intent"],
+                    json.dumps(scenario["scene_state"], sort_keys=True),
+                    json.dumps(scenario["requested_constraints"], sort_keys=True),
+                    json.dumps(scenario["evaluation"], sort_keys=True), scenario["state_hash"],
+                    scenario["geometry_engine_version"], scenario["proposal_strategy_version"],
+                    scenario.get("model_id"), scenario["tool_schema_version"],
+                    json.dumps(scenario["accepted_tool_calls"], sort_keys=True), scenario["created_at"],
+                ),
+            )
+
+    def get_scenario_version(self, scenario_id: str, revision: int | None = None) -> dict | None:
+        query = "SELECT * FROM scenario_versions WHERE scenario_id = ?"
+        params: tuple = (scenario_id,)
+        if revision is not None:
+            query += " AND revision = ?"
+            params = (scenario_id, revision)
+        query += " ORDER BY revision DESC LIMIT 1"
+        with self._get_conn() as conn:
+            row = conn.execute(query, params).fetchone()
+        return self._scenario_row(row) if row else None
+
+    def list_scenario_versions(self, scenario_id: str) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM scenario_versions WHERE scenario_id = ? ORDER BY revision ASC", (scenario_id,)
+            ).fetchall()
+        return [self._scenario_row(row) for row in rows]
+
+    @staticmethod
+    def _scenario_row(row: sqlite3.Row) -> dict:
+        return {
+            "scenario_id": row["scenario_id"], "workspace_id": row["workspace_id"],
+            "revision": row["revision"], "parent_scenario_id": row["parent_scenario_id"],
+            "site_snapshot_id": row["site_snapshot_id"], "user_intent": row["user_intent"],
+            "scene_state": json.loads(row["scene_state_json"]),
+            "requested_constraints": json.loads(row["requested_constraints_json"]),
+            "evaluation": json.loads(row["evaluation_json"]), "state_hash": row["state_hash"],
+            "geometry_engine_version": row["geometry_engine_version"],
+            "proposal_strategy_version": row["proposal_strategy_version"],
+            "model_id": row["model_id"], "tool_schema_version": row["tool_schema_version"],
+            "accepted_tool_calls": json.loads(row["accepted_tool_calls_json"]),
+            "created_at": row["created_at"],
+        }
 
     def observe(
         self,
