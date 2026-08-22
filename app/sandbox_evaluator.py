@@ -2,16 +2,18 @@
 from __future__ import annotations
 
 import math
+import time
 from typing import Any
 
 from shapely.geometry import Polygon, shape
 from shapely.ops import transform
 
-from app.sandbox import EARTH_RADIUS_M, SCENE_SCHEMA_VERSION
+from app.sandbox import EARTH_RADIUS_M, SCENE_SCHEMA_VERSION, SITE_SNAPSHOT_FIELD_SCOPES
 
 
 FRAME_VERSION = "local_tangent_plane_v1"
 GEOMETRY_EVIDENCE_IDS = ("parcel_id", "parcel_boundary_geojson", "parcel_match_type", "parcel_match_distance_m")
+EVIDENCE_EVALUATOR_VERSION = "sandbox_evidence.field_predicate.v1"
 
 
 class SceneValidationError(ValueError):
@@ -44,6 +46,8 @@ def _result(
 
 
 def _number(value: Any, name: str, *, positive: bool = False, nonnegative: bool = False) -> float:
+    if isinstance(value, bool):
+        raise SceneValidationError(f"{name} must be numeric.")
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
@@ -116,9 +120,8 @@ def build_oriented_footprint(proposed_object: dict) -> Polygon:
     return footprint
 
 
-def _geometry_evidence_issue(snapshot: dict) -> str | None:
-    if snapshot.get("is_expired"):
-        return "The SiteSnapshot is stale; parcel geometry cannot be treated as current."
+def _geometry_evidence_issue(snapshot: dict, *, now: float | None = None) -> str | None:
+    now = time.time() if now is None else now
     identity = snapshot.get("parcel_identity", {})
     if identity.get("parcel_match_type") != "exact_intersect" or identity.get("parcel_match_distance_m") != 0:
         return "The SiteSnapshot does not prove an exact parcel identity."
@@ -129,6 +132,15 @@ def _geometry_evidence_issue(snapshot: dict) -> str | None:
         record = evidence.get(evidence_id)
         if not isinstance(record, dict) or record.get("status") not in {"ok", None} or record.get("value") is None:
             return f"Required parcel evidence is missing or unavailable: {evidence_id}."
+        expires_at = record.get("expires_at")
+        if expires_at is not None:
+            try:
+                if now >= float(expires_at):
+                    return f"Required parcel evidence is stale: {evidence_id}."
+            except (TypeError, ValueError):
+                return f"Required parcel evidence has invalid freshness metadata: {evidence_id}."
+    if snapshot.get("is_expired") and not all(evidence.get(field, {}).get("expires_at") is not None for field in GEOMETRY_EVIDENCE_IDS):
+        return "The SiteSnapshot is stale; parcel geometry cannot be treated as current."
     return None
 
 
@@ -260,7 +272,229 @@ def _unsupported(spec: dict, reason: str) -> dict:
     )
 
 
-def evaluate_site(snapshot: dict, scene_state: dict, requested_constraints: list[dict]) -> dict:
+def _evidence_gate(snapshot: dict, fields: tuple[str, ...], scope: str, *, now: float, require_exact_parcel: bool = False) -> dict:
+    gate = {"accepted": False, "evidence_ids": list(fields), "expected_scope": scope, "reason_code": None, "reason": None, "values": {}, "records": {}}
+
+    def reject(code: str, reason: str) -> dict:
+        gate.update(reason_code=code, reason=reason)
+        return gate
+
+    if require_exact_parcel:
+        identity = snapshot.get("parcel_identity", {})
+        if identity.get("parcel_match_type") != "exact_intersect" or identity.get("parcel_match_distance_m") != 0:
+            return reject("parcel_identity_not_exact", "The SiteSnapshot does not prove an exact parcel identity.")
+    evidence = snapshot.get("evidence")
+    if not isinstance(evidence, dict):
+        return reject("evidence_missing", "Required MIREYE evidence is missing.")
+    for field in fields:
+        record = evidence.get(field)
+        if not isinstance(record, dict):
+            return reject("field_missing", f"Required MIREYE evidence is missing: {field}.")
+        if record.get("status") != "ok":
+            return reject("status_unusable", f"Required MIREYE evidence has unusable status: {field}.")
+        if record.get("value") is None:
+            return reject("value_null", f"Required MIREYE evidence is null: {field}.")
+        try:
+            expires_at = float(record.get("expires_at"))
+        except (TypeError, ValueError):
+            return reject("freshness_missing", f"Required MIREYE evidence has no valid freshness metadata: {field}.")
+        if not math.isfinite(expires_at) or expires_at <= now:
+            return reject("field_stale", f"Required MIREYE evidence is stale: {field}.")
+        actual_scope = str(record.get("scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(field, "")).upper().replace("-", "_")
+        if actual_scope != scope:
+            return reject("scope_incompatible", f"Required MIREYE evidence has {actual_scope or 'unknown'} scope, not {scope} scope: {field}.")
+        gate["values"][field] = record["value"]
+        gate["records"][field] = {"status": record.get("status"), "scope": actual_scope, "expires_at": expires_at, "source": record.get("source")}
+    gate.update(accepted=True, reason_code="accepted", reason="All required evidence records are fresh, usable, and scope-compatible.")
+    return gate
+
+
+def _gate_summary(gate: dict) -> dict:
+    return {key: gate[key] for key in ("accepted", "evidence_ids", "expected_scope", "reason_code", "reason")}
+
+
+def _evidence_unresolved(spec: dict, gate: dict, explanation: str | None = None) -> dict:
+    return _result(
+        spec["constraint_id"], "UNRESOLVED", basis="OBSERVED", evidence_ids=gate["evidence_ids"],
+        calculation="sandbox_evidence.field_gate.v1", inputs={"evidence_gate": _gate_summary(gate)},
+        result=None, explanation=explanation or gate["reason"],
+    )
+
+
+def _source_number(spec: dict, gate: dict, field: str, *, maximum: float | None = None) -> float | dict:
+    value = gate["values"][field]
+    if isinstance(value, bool):
+        return _evidence_unresolved(spec, gate, f"MIREYE evidence is not numeric: {field}.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return _evidence_unresolved(spec, gate, f"MIREYE evidence is not numeric: {field}.")
+    if not math.isfinite(number) or number < 0 or (maximum is not None and number > maximum):
+        return _evidence_unresolved(spec, gate, f"MIREYE evidence is outside the valid range: {field}.")
+    return number
+
+
+def _wetland_threshold(spec: dict, snapshot: dict, *, now: float, field: str, threshold_key: str, constraint_id: str, units: str, maximum: float | None = None) -> dict:
+    gate = _evidence_gate(snapshot, (field,), "PARCEL", now=now, require_exact_parcel=True)
+    if not gate["accepted"]:
+        return _evidence_unresolved(spec, gate)
+    threshold = _number(spec.get(threshold_key), threshold_key, nonnegative=True)
+    if maximum is not None and threshold > maximum:
+        raise SceneValidationError(f"{threshold_key} cannot exceed {maximum}.")
+    value = _source_number(spec, gate, field, maximum=maximum)
+    if isinstance(value, dict):
+        return value
+    failed = value > threshold
+    return _result(
+        constraint_id, "FAIL" if failed else "PASS", basis="OBSERVED", evidence_ids=(field,), calculation=EVIDENCE_EVALUATOR_VERSION,
+        inputs={threshold_key: threshold, "evidence_gate": _gate_summary(gate)}, result=value, units=units,
+        explanation=("Mapped NWI parcel overlap exceeds the requested threshold." if failed else "Mapped NWI parcel overlap meets the requested threshold.") + " Zero mapped overlap does not establish survey-grade wetland absence or USACE jurisdiction.",
+    )
+
+
+def _parcel_acreage_range(spec: dict, snapshot: dict, *, now: float) -> dict:
+    field = "parcel_area_m2"
+    gate = _evidence_gate(snapshot, (field,), "PARCEL", now=now, require_exact_parcel=True)
+    if not gate["accepted"]:
+        return _evidence_unresolved(spec, gate)
+    minimum = _number(spec.get("min_acres"), "min_acres", nonnegative=True)
+    maximum = _number(spec.get("max_acres"), "max_acres", nonnegative=True)
+    if minimum > maximum:
+        raise SceneValidationError("min_acres cannot exceed max_acres.")
+    area_m2 = _source_number(spec, gate, field)
+    if isinstance(area_m2, dict):
+        return area_m2
+    acres = area_m2 / 4046.8564224
+    passed = minimum <= acres <= maximum
+    return _result(
+        "parcel_acreage_range", "PASS" if passed else "FAIL", basis="OBSERVED", evidence_ids=(field,),
+        calculation=EVIDENCE_EVALUATOR_VERSION,
+        inputs={"min_acres": minimum, "max_acres": maximum, "evidence_gate": _gate_summary(gate)},
+        result=round(acres, 6), units="acres",
+        explanation="The observed parcel area is within the requested acreage range." if passed else "The observed parcel area is outside the requested acreage range.",
+    )
+
+
+def _resolution_point_flood(spec: dict, snapshot: dict, *, now: float) -> dict:
+    field = "within_floodplain_polygon"
+    gate = _evidence_gate(snapshot, (field,), "POINT", now=now)
+    if not gate["accepted"]:
+        return _evidence_unresolved(spec, gate)
+    value = gate["values"][field]
+    if not isinstance(value, bool):
+        return _evidence_unresolved(spec, gate, "MIREYE within_floodplain_polygon evidence is not boolean.")
+    return _result(
+        "resolution_point_outside_fema_sfha", "FAIL" if value else "PASS", basis="OBSERVED", evidence_ids=(field,), calculation=EVIDENCE_EVALUATOR_VERSION,
+        inputs={"evidence_gate": _gate_summary(gate)}, result=value, units=None,
+        explanation=("The resolution point is inside the mapped FEMA floodplain polygon." if value else "The resolution point is outside the mapped FEMA floodplain polygon.") + " This does not prove parcel-wide or footprint-wide flood exclusion.",
+    )
+
+
+def _resolution_point_slope(spec: dict, snapshot: dict, *, now: float) -> dict:
+    field = "slope_degrees"
+    gate = _evidence_gate(snapshot, (field,), "POINT", now=now)
+    if not gate["accepted"]:
+        return _evidence_unresolved(spec, gate)
+    threshold = _number(spec.get("max_degrees"), "max_degrees", nonnegative=True)
+    value = _source_number(spec, gate, field, maximum=90)
+    if isinstance(value, dict):
+        return value
+    failed = value > threshold
+    return _result(
+        "max_resolution_point_slope_degrees", "FAIL" if failed else "PASS", basis="OBSERVED", evidence_ids=(field,), calculation=EVIDENCE_EVALUATOR_VERSION,
+        inputs={"max_degrees": threshold, "evidence_gate": _gate_summary(gate)}, result=value, units="degrees",
+        explanation=("The resolution-point slope exceeds the requested threshold." if failed else "The resolution-point slope meets the requested threshold.") + " This does not prove parcel-wide or footprint-wide slope.",
+    )
+
+
+def _normalized_code(value: str) -> str:
+    return value.strip().casefold()
+
+
+def _optional_evidence(snapshot: dict, field: str, *, now: float) -> tuple[Any, dict]:
+    gate = _evidence_gate(snapshot, (field,), "NEAREST_FEATURE", now=now)
+    return (gate["values"].get(field) if gate["accepted"] else None), gate
+
+
+def _resolution_point_distance(spec: dict, snapshot: dict, *, now: float, constraint_id: str, distance_field: str, label: str, status_field: str | None = None, voltage_field: str | None = None) -> dict:
+    gate = _evidence_gate(snapshot, (distance_field,), "NEAREST_FEATURE", now=now)
+    if not gate["accepted"]:
+        return _evidence_unresolved(spec, gate)
+    threshold = _number(spec.get("max_distance_m"), "max_distance_m", nonnegative=True)
+    distance = _source_number(spec, gate, distance_field)
+    if isinstance(distance, dict):
+        return distance
+    evidence_ids = [distance_field]
+    result = {"distance_m": distance}
+    for field, key in ((status_field, "status"), (voltage_field, "voltage_kv")):
+        if field:
+            value, optional_gate = _optional_evidence(snapshot, field, now=now)
+            if key == "status" and value is not None and (not isinstance(value, str) or not value.strip()):
+                optional_gate.update(accepted=False, reason_code="value_invalid", reason=f"MIREYE evidence is not a usable raw status: {field}.")
+                value = None
+            if key == "voltage_kv" and value is not None:
+                try:
+                    value = float(value)
+                    if not math.isfinite(value) or value < 0:
+                        raise ValueError
+                except (TypeError, ValueError):
+                    optional_gate.update(accepted=False, reason_code="value_invalid", reason=f"MIREYE evidence is not a valid voltage: {field}.")
+                    value = None
+            result[key] = value
+            result[f"{key}_evidence"] = _gate_summary(optional_gate)
+            if optional_gate["accepted"]:
+                evidence_ids.append(field)
+    required_statuses = spec.get("required_statuses")
+    require_operational = spec.get("require_operational")
+    if require_operational is not None and not isinstance(require_operational, bool):
+        raise SceneValidationError("require_operational must be boolean or null.")
+    if require_operational and not required_statuses:
+        return _evidence_unresolved(spec, gate, "Operational status cannot be inferred without an explicit caller-supplied required_statuses allow-list.")
+    status_failed = False
+    if required_statuses is not None:
+        if not isinstance(required_statuses, list) or not required_statuses or not all(isinstance(value, str) and value.strip() for value in required_statuses):
+            raise SceneValidationError("required_statuses must be a non-empty list of raw status values.")
+        if not status_field:
+            raise SceneValidationError("This constraint does not support a status requirement.")
+        status_gate = _evidence_gate(snapshot, (status_field,), "NEAREST_FEATURE", now=now)
+        if not status_gate["accepted"]:
+            return _evidence_unresolved(spec, status_gate)
+        status = status_gate["values"][status_field]
+        if not isinstance(status, str) or not status.strip():
+            return _evidence_unresolved(spec, status_gate, f"MIREYE evidence is not a usable raw status: {status_field}.")
+        status_failed = _normalized_code(status) not in {_normalized_code(value) for value in required_statuses}
+    failed = distance > threshold or status_failed
+    caveat = " This does not establish grid capacity or available MW." if label in {"substation", "transmission line"} else " This does not establish legal access, frontage, right-of-way, or heavy-haul suitability."
+    return _result(
+        constraint_id, "FAIL" if failed else "PASS", basis="OBSERVED", evidence_ids=evidence_ids, calculation=EVIDENCE_EVALUATOR_VERSION,
+        inputs={"max_distance_m": threshold, "required_statuses": required_statuses, "require_operational": require_operational, "evidence_gate": _gate_summary(gate)},
+        result=result, units="m", explanation=(f"The resolution-point distance or raw status requirement for the nearest {label} is not met." if failed else f"The resolution-point distance and any raw status requirement for the nearest {label} are met.") + caveat,
+    )
+
+
+def _zoning_allow_list(spec: dict, snapshot: dict, *, now: float) -> dict:
+    field = "parcel_zoning"
+    gate = _evidence_gate(snapshot, (field,), "PARCEL", now=now, require_exact_parcel=True)
+    if not gate["accepted"]:
+        return _evidence_unresolved(spec, gate)
+    allowed_codes = spec.get("allowed_codes")
+    if not isinstance(allowed_codes, list) or not allowed_codes or not all(isinstance(code, str) and code.strip() for code in allowed_codes):
+        raise SceneValidationError("allowed_codes must be a non-empty list of raw zoning codes.")
+    zoning = gate["values"][field]
+    if not isinstance(zoning, str) or not zoning.strip():
+        return _evidence_unresolved(spec, gate, "MIREYE parcel_zoning evidence is not an unambiguous raw zoning code.")
+    normalized = _normalized_code(zoning)
+    normalized_allowed = [_normalized_code(code) for code in allowed_codes]
+    passed = normalized in normalized_allowed
+    return _result(
+        "parcel_zoning_code_in", "PASS" if passed else "FAIL", basis="OBSERVED", evidence_ids=(field,), calculation=EVIDENCE_EVALUATOR_VERSION,
+        inputs={"allowed_codes": allowed_codes, "normalized_allowed_codes": normalized_allowed, "evidence_gate": _gate_summary(gate)},
+        result={"raw_code": zoning, "normalized_code": normalized}, units=None,
+        explanation=("The normalized raw parcel zoning code is in the caller-supplied allow-list." if passed else "The normalized raw parcel zoning code is not in the caller-supplied allow-list.") + " No industrial-use meaning is inferred.",
+    )
+
+
+def evaluate_site(snapshot: dict, scene_state: dict, requested_constraints: list[dict], *, now: float | None = None) -> dict:
     """Evaluate only predicates that the snapshot evidence and scene geometry can prove."""
     if not isinstance(requested_constraints, list) or not requested_constraints:
         raise SceneValidationError("At least one requested constraint is required.")
@@ -269,8 +503,9 @@ def evaluate_site(snapshot: dict, scene_state: dict, requested_constraints: list
     parcel = _to_local_geometry(snapshot.get("geometry", {}), origin)
     if parcel.geom_type not in {"Polygon", "MultiPolygon"} or parcel.area <= 0:
         raise SceneValidationError("SiteSnapshot does not contain a valid parcel polygon.")
+    evaluation_time = time.time() if now is None else now
     metrics = _metrics(parcel, objects)
-    geometry_issue = _geometry_evidence_issue(snapshot)
+    geometry_issue = _geometry_evidence_issue(snapshot, now=evaluation_time)
     results = []
     geometry_handlers = {
         "footprint_inside_parcel": _containment,
@@ -294,12 +529,38 @@ def evaluate_site(snapshot: dict, scene_state: dict, requested_constraints: list
             results.append(_unsupported(spec, "slope_degrees is point-scoped evidence and cannot prove a parcel-wide or footprint-wide slope predicate."))
         elif constraint_id == "industrial_zoning":
             results.append(_unsupported(spec, "parcel_zoning has no jurisdiction-aware industrial-zoning mapping in this evaluator."))
+        elif constraint_id == "parcel_acreage_range":
+            results.append(_parcel_acreage_range(spec, snapshot, now=evaluation_time))
+        elif constraint_id == "max_nwi_wetland_fraction_of_parcel":
+            results.append(_wetland_threshold(spec, snapshot, now=evaluation_time, field="wetland_fraction_of_parcel", threshold_key="max_fraction", constraint_id=constraint_id, units="fraction", maximum=1))
+        elif constraint_id == "max_nwi_wetland_acres_on_parcel":
+            results.append(_wetland_threshold(spec, snapshot, now=evaluation_time, field="wetland_acres_on_parcel", threshold_key="max_acres", constraint_id=constraint_id, units="acres"))
+        elif constraint_id == "resolution_point_outside_fema_sfha":
+            results.append(_resolution_point_flood(spec, snapshot, now=evaluation_time))
+        elif constraint_id == "max_resolution_point_slope_degrees":
+            results.append(_resolution_point_slope(spec, snapshot, now=evaluation_time))
+        elif constraint_id == "max_resolution_point_substation_distance_m":
+            results.append(_resolution_point_distance(spec, snapshot, now=evaluation_time, constraint_id=constraint_id, distance_field="nearest_substation_distance_m", status_field="nearest_substation_status", voltage_field="nearest_substation_max_voltage_kv", label="substation"))
+        elif constraint_id == "max_resolution_point_transmission_distance_m":
+            results.append(_resolution_point_distance(spec, snapshot, now=evaluation_time, constraint_id=constraint_id, distance_field="nearest_transmission_line_distance_m", status_field="nearest_transmission_line_status", voltage_field="nearest_transmission_line_voltage_kv", label="transmission line"))
+        elif constraint_id == "max_resolution_point_major_road_distance_m":
+            results.append(_resolution_point_distance(spec, snapshot, now=evaluation_time, constraint_id=constraint_id, distance_field="nearest_major_road_distance_m", label="major road"))
+        elif constraint_id == "parcel_zoning_code_in":
+            results.append(_zoning_allow_list(spec, snapshot, now=evaluation_time))
+        elif constraint_id in {"parcel_outside_fema_sfha", "footprint_outside_fema_sfha"}:
+            results.append(_unsupported(spec, "Point-scoped FEMA evidence cannot prove whole-parcel or whole-footprint flood exclusion."))
+        elif constraint_id in {"legal_access", "heavy_haul_suitability"}:
+            results.append(_unsupported(spec, "Mapped-road proximity cannot prove legal access, frontage, right-of-way, or heavy-haul suitability."))
+        elif constraint_id in {"substation_available_capacity_mw", "transmission_available_capacity_mw", "sufficient_grid_capacity"}:
+            results.append(_unsupported(spec, "Proximity, voltage, status, and queue counts cannot prove available grid capacity or deliverability."))
+        elif constraint_id in {"utilities_available", "utility_capacity"}:
+            results.append(_unsupported(spec, "The current evidence does not directly and authoritatively prove utility availability or capacity."))
         else:
             results.append(_unsupported(spec, "This constraint is not supported by the deterministic evaluator."))
     outcomes = {item["outcome"] for item in results}
     overall = "FAIL" if "FAIL" in outcomes else "UNRESOLVED" if "UNRESOLVED" in outcomes else "PASS"
     return {
-        "evaluator_version": "site_sandbox_geometry_v1",
+        "evaluator_version": "site_sandbox_evidence_v1",
         "site_snapshot_id": snapshot["snapshot_id"],
         "overall_status": overall,
         "constraint_results": results,

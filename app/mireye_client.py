@@ -352,6 +352,15 @@ class MireyeClient:
             },
         }
 
+    async def ask(self, *, lat: float, lng: float, question: str, include_trace: bool = False) -> dict:
+        """Ask MIREYE about one supplied coordinate using the documented /v1/ask contract."""
+        if self.mode == "live":
+            return await self._request(
+                "POST", "/v1/ask",
+                json_body={"lat": float(lat), "lng": float(lng), "question": question, "include_trace": bool(include_trace)},
+            )
+        return {"answer": "Local mode cannot provide MIREYE site Q&A.", "status": "unavailable", "trace": []}
+
     async def register_site(self, payload: dict) -> dict:
         """Register a site polygon or point (/v1/sites)."""
         if self.mode == "live":
@@ -382,7 +391,8 @@ class MireyeClient:
     async def usage(self) -> dict:
         """Check API key validity and credit balance."""
         if self.mode == "live":
-            return await self._request("GET", "/v1/usage")
+            # Current OpenAPI contract (0.15.0) scopes usage to the caller.
+            return await self._request("GET", "/v1/users/me/usage")
 
         return {
             "status": "ok",

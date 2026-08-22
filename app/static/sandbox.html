@@ -1,140 +1,120 @@
-<!DOCTYPE html>
-<html lang="en" data-theme="light">
+<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mireye Site Sandbox</title>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <title>Mireye | Site workspace</title>
   <link rel="stylesheet" href="/static/style.css">
   <link rel="stylesheet" href="/static/vendor/maplibre-gl.css">
   <link rel="stylesheet" href="/static/sandbox.css">
 </head>
-<body>
-  <div class="grid-background"></div>
-  <header class="app-header">
-    <div class="header-inner">
-      <a class="brand-wrapper sandbox-brand" href="/" aria-label="Mireye home">
-        <span class="sandbox-mark">M</span>
-        <span class="brand-title">Mireye</span>
-        <span class="brand-tagline-badge">Site Sandbox</span>
-      </a>
-      <div class="sandbox-header-state">
-        <span class="sandbox-state observed">OBSERVED</span>
-        <span class="mono" id="snapshotState">LOADING SNAPSHOT</span>
-      </div>
-    </div>
+<body class="sandbox-page">
+  <header class="sandbox-header">
+    <a class="product-brand" href="/" aria-label="Start a new Mireye search"><span class="product-mark" aria-hidden="true">M</span><span>Mireye</span></a>
+    <div class="sandbox-site-heading"><span id="parcelTitle">Loading site</span><small id="snapshotState">Checking site intelligence</small></div>
+    <a class="text-button" href="/">New search</a>
   </header>
 
-  <main class="app-main sandbox-main">
-    <section class="sandbox-toolbar" aria-label="Site snapshot summary">
-      <div>
-        <div class="sandbox-eyebrow">REAL PARCEL SNAPSHOT</div>
-        <h1 id="parcelTitle">Loading parcel</h1>
-        <p class="mono" id="parcelMeta">MIREYE-SOURCED GEOMETRY</p>
+  <main class="sandbox-shell">
+    <section class="map-workspace" aria-label="3D site map">
+      <div id="sandboxMap"></div>
+      <div class="map-overlay map-overlay-top">
+        <span class="layer-key observed"><i></i>Observed</span>
+        <span class="layer-key derived"><i></i>Derived</span>
+        <span class="layer-key proposed"><i></i>Proposed</span>
       </div>
-      <div class="sandbox-origin-key" aria-label="Scene origin legend">
-        <span><i class="origin-dot observed-dot"></i>OBSERVED</span>
-        <span><i class="origin-dot derived-dot"></i>DERIVED</span>
-        <span><i class="origin-dot proposed-dot"></i>PROPOSED</span>
+      <div class="map-overlay map-overlay-bottom">
+        <span id="groundStateChip">Conceptual flat ground</span>
+        <span id="cameraReadout">3D view</span>
       </div>
-    </section>
+      <div class="layer-controls" id="worldPanel" hidden>
+        <label><input id="terrainToggle" type="checkbox" checked disabled> Terrain</label>
+        <label><input id="roadsToggle" type="checkbox" checked disabled> Roads</label>
+        <span id="worldState">Observed layers</span>
+      </div>
+      <div class="sandbox-error" id="sandboxError" hidden></div>
 
-    <section class="sandbox-layout">
-      <div class="sandbox-scene-panel">
-        <div id="sandboxMap" aria-label="3D parcel sandbox map"></div>
-        <div class="scene-chip scene-chip-top">CONCEPTUAL FLAT GROUND PLANE</div>
-        <div class="scene-chip scene-chip-bottom" id="cameraReadout">PITCH 55 | BEARING 0</div>
-        <div class="scene-legend">
-          <span><i class="legend-line observed-line"></i>Verified parcel</span>
-          <span><i class="legend-dot observed-dot"></i>Resolution point</span>
-          <span><i class="legend-block proposed-block"></i>Conceptual data center</span>
+      <section class="chat-dock" aria-label="Ask about this site">
+        <div class="chat-output" id="chatOutput">
+          <div class="chat-response" id="chatResponse">Ask Mireye to place a facility, change a layout, evaluate it, or explain an outcome.</div>
+          <div class="chat-activity" id="chatTrace" hidden></div>
+          <div class="evaluation-results" id="chatEvaluation" hidden></div>
         </div>
-        <div class="sandbox-error" id="sandboxError" hidden></div>
-      </div>
-
-      <aside class="sandbox-sidebar">
-        <section class="sandbox-panel">
-          <div class="sandbox-panel-heading">
-            <div>
-              <div class="sandbox-eyebrow">PROPOSED OBJECT</div>
-              <h2>Data Center</h2>
-            </div>
-            <span class="sandbox-state proposed">PROPOSED</span>
-          </div>
-          <div class="sandbox-form-grid">
-            <label>Capacity MW<input id="capacityMw" type="number" min="1" step="1" value="100"></label>
-            <label>Height m<input id="heightM" type="number" min="1" step="1" value="28"></label>
-            <label>Width m<input id="widthM" type="number" min="1" step="1" value="250"></label>
-            <label>Length m<input id="lengthM" type="number" min="1" step="1" value="350"></label>
-            <label class="sandbox-span-two">Rotation deg<input id="rotationDeg" type="number" min="0" max="359" step="1" value="0"></label>
-          </div>
-          <p class="sandbox-note">Conceptual dimensions only. No engineering or capacity claim is implied.</p>
-        </section>
-
-        <section class="sandbox-panel sandbox-demo-panel">
-          <div class="sandbox-panel-heading">
-            <div>
-              <div class="sandbox-eyebrow">DEMO</div>
-              <h2>Live Site State</h2>
-            </div>
-            <span class="sandbox-state observed">OBSERVED</span>
-          </div>
-          <div class="sandbox-demo-label">REAL PARCEL</div>
-          <dl class="sandbox-facts" id="snapshotFacts"></dl>
-          <div class="sandbox-demo-label">CURRENT SCENARIO</div>
-          <dl class="sandbox-facts" id="scenarioFacts"></dl>
-          <div class="sandbox-demo-label">SCENE LEGEND</div>
-          <div class="sandbox-origin-key sandbox-demo-legend">
-            <span><i class="origin-dot observed-dot"></i>OBSERVED</span>
-            <span><i class="origin-dot derived-dot"></i>DERIVED</span>
-            <span><i class="origin-dot proposed-dot"></i>PROPOSED</span>
-          </div>
-        </section>
-
-        <section class="sandbox-panel">
-          <div class="sandbox-panel-heading">
-            <div>
-              <div class="sandbox-eyebrow">SCENARIO</div>
-              <h2 id="scenarioTitle">Unsaved Session</h2>
-            </div>
-            <span class="sandbox-state derived" id="scenarioRevision">REV -</span>
-          </div>
-          <label class="sandbox-chat-input">Intent<input id="scenarioIntent" type="text" placeholder="Scenario A"></label>
-          <div class="sandbox-scenario-actions">
-            <button class="sandbox-chat-submit" id="scenarioSave" type="button">Save</button>
-            <button class="sandbox-chat-submit" id="scenarioBranch" type="button" disabled>Branch</button>
-          </div>
-          <label class="sandbox-chat-input">Scenario<select id="scenarioSelect"><option value="">Current session</option></select></label>
-          <label class="sandbox-chat-input">Compare with<select id="scenarioCompareSelect"><option value="">Choose scenario</option></select></label>
-          <button class="sandbox-chat-submit" id="scenarioCompare" type="button" disabled>Compare</button>
-          <div class="sandbox-evaluation" id="scenarioComparison" hidden></div>
-        </section>
-
-        <section class="sandbox-panel sandbox-chat-panel">
-          <div class="sandbox-panel-heading">
-            <div>
-              <div class="sandbox-eyebrow">SANDBOX AGENT</div>
-              <h2>Scenario Assistant</h2>
-            </div>
-            <span class="sandbox-state derived" id="chatState">READY</span>
-          </div>
-          <div class="sandbox-chat-response" id="chatResponse">Proposed objects are conceptual. Evaluation results are deterministic.</div>
-          <div class="sandbox-tool-trace" id="chatTrace" hidden></div>
-          <div class="sandbox-demo-prompts" aria-label="Example instructions">
-            <button type="button">Put a 100 MW data center here.</button>
-            <button type="button">Move it 200 meters north.</button>
-            <button type="button">Make it 120 m by 140 m.</button>
-            <button type="button">Rotate it 30 degrees.</button>
-            <button type="button">Does it fit?</button>
-            <button type="button">Create a second scenario at 150 MW.</button>
-            <button type="button">Compare the scenarios.</button>
-          </div>
-          <label class="sandbox-chat-input">Instruction<textarea id="chatMessage" rows="3" placeholder="Move it 200 meters north."></textarea></label>
-          <button class="sandbox-chat-submit" id="chatSubmit" type="button">Send</button>
-          <div class="sandbox-evaluation" id="chatEvaluation" hidden></div>
-        </section>
-      </aside>
+        <div class="prompt-strip sandbox-demo-prompts" aria-label="Example instructions">
+          <button type="button">Put a 100 MW data center here.</button>
+          <button type="button">Move it 200 meters north.</button>
+          <button type="button">Make it 120 m by 140 m.</button>
+          <button type="button">Rotate it 30 degrees.</button>
+          <button type="button">Does it fit?</button>
+          <button type="button">Try a second option at 150 MW.</button>
+          <button type="button">Which option is better?</button>
+        </div>
+        <div class="chat-composer">
+          <label class="sr-only" for="chatMessage">Ask about this site</label>
+          <textarea id="chatMessage" rows="1" placeholder="Ask about this site…"></textarea>
+          <button class="primary-button" id="chatSubmit" type="button">Send</button>
+        </div>
+        <span class="chat-status" id="chatState">Ready</span>
+      </section>
     </section>
+
+    <aside class="site-rail">
+      <section class="rail-section site-summary">
+        <p class="rail-kicker">Site intelligence</p>
+        <h1 id="siteName">Real property</h1>
+        <p id="parcelMeta">Verified parcel geometry</p>
+        <dl class="compact-facts" id="snapshotFacts"></dl>
+      </section>
+
+      <section class="rail-section intelligence-card">
+        <div class="rail-heading"><div><p class="rail-kicker">MIREYE site intelligence</p><h2 id="intelligenceHeadline">Checking freshness</h2></div><span class="status-dot" id="mireyeFreshnessState"></span></div>
+        <p class="muted" id="mireyeRefreshNote">Checking available source evidence.</p>
+        <dl class="intelligence-counts" id="mireyeFreshnessFacts"></dl>
+        <div class="rail-actions">
+          <button class="text-button" id="viewSources" type="button">View sources</button>
+          <button class="text-button" id="mireyeRefreshQuote" type="button">Refresh</button>
+        </div>
+        <div class="refresh-confirm" id="refreshConfirmPanel" hidden>
+          <p id="refreshQuoteText"></p>
+          <div><button class="primary-button" id="mireyeRefreshConfirm" type="button" disabled>Refresh with MIREYE</button><button class="text-button" id="mireyeRefreshCancel" type="button">Not now</button></div>
+        </div>
+      </section>
+
+      <section class="rail-section design-summary">
+        <div class="rail-heading"><div><p class="rail-kicker">Proposed design</p><h2>Data center</h2></div><span class="origin-label proposed">Proposed</span></div>
+        <dl class="compact-facts" id="designFacts"></dl>
+        <p class="caveat">Conceptual layout only. No engineering or grid-capacity claim is implied.</p>
+      </section>
+
+      <section class="rail-section scenario-section">
+        <div class="rail-heading"><div><p class="rail-kicker">Design options</p><h2 id="scenarioTitle">Current option</h2></div><span id="scenarioRevision" class="scenario-count">Unsaved</span></div>
+        <dl class="compact-facts" id="scenarioFacts"></dl>
+        <label class="field-label" for="scenarioIntent">Option name</label>
+        <input class="field-control" id="scenarioIntent" type="text" placeholder="Scenario A">
+        <div class="scenario-actions"><button class="secondary-button" id="scenarioSave" type="button">Save option</button><button class="secondary-button" id="scenarioBranch" type="button" disabled>Try another</button></div>
+        <label class="field-label" for="scenarioSelect">Current option</label>
+        <select class="field-control" id="scenarioSelect"><option value="">Current session</option></select>
+        <label class="field-label" for="scenarioCompareSelect">Compare with</label>
+        <select class="field-control" id="scenarioCompareSelect"><option value="">Choose an option</option></select>
+        <button class="secondary-button full-button" id="scenarioCompare" type="button" disabled>Compare options</button>
+        <div class="scenario-comparison" id="scenarioComparison" hidden></div>
+      </section>
+
+      <section class="rail-section world-details" id="worldDetails" hidden>
+        <p class="rail-kicker">Observed world layers</p>
+        <dl class="compact-facts" id="worldFacts"></dl>
+        <div id="worldSources" hidden></div>
+        <p class="caveat" id="worldWarning"></p>
+      </section>
+    </aside>
   </main>
+
+  <dialog class="sources-dialog" id="sourcesDialog">
+    <div class="dialog-heading"><div><p class="rail-kicker">MIREYE site intelligence</p><h2>Sources and freshness</h2></div><button class="icon-button" id="closeSources" type="button" aria-label="Close sources">×</button></div>
+    <p class="muted">Each fact retains its source, capture time, confidence, and field-level freshness.</p>
+    <div class="sources-list" id="sourcesList"></div>
+  </dialog>
 
   <script src="/static/vendor/maplibre-gl.js"></script>
   <script src="/static/sandbox.js"></script>

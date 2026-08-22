@@ -188,6 +188,8 @@ def test_exact_match_creates_immutable_snapshot_after_confirmation(sandbox):
     assert snapshot["parcel_identity"]["parcel_match_type"] == "exact_intersect"
     assert snapshot["geometry"]["type"] == "Polygon"
     assert snapshot["evidence"]["parcel_boundary_geojson"]["ttl_seconds"] == 60
+    assert snapshot["evidence"]["wetland_fraction_of_parcel"]["scope"] == "PARCEL"
+    assert snapshot["evidence"]["nearest_substation_distance_m"]["scope"] == "NEAREST_FEATURE"
     assert client.quote_calls[-1]["locations"] == 1
     assert client.fetch_calls[-1]["fields"] == list(SITE_SNAPSHOT_FIELDS)
     assert stored["raw_response_hash"] == snapshot["raw_response_hash"]

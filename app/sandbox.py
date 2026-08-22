@@ -1,6 +1,7 @@
 """Real-parcel SiteSnapshot acquisition for the Site Sandbox."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import math
@@ -51,6 +52,31 @@ SITE_SNAPSHOT_FIELDS = (
     "within_sewer_service_area",
     "sewer_service_area_provider",
 )
+
+SITE_SNAPSHOT_FIELD_SCOPES = {
+    "parcel_area_m2": "PARCEL",
+    "parcel_zoning": "PARCEL",
+    "slope_degrees": "POINT",
+    "fema_flood_zone": "POINT",
+    "within_floodplain_polygon": "POINT",
+    "wetland_acres_on_parcel": "PARCEL",
+    "wetland_fraction_of_parcel": "PARCEL",
+    "nearest_substation_distance_m": "NEAREST_FEATURE",
+    "nearest_substation_max_voltage_kv": "NEAREST_FEATURE",
+    "nearest_substation_status": "NEAREST_FEATURE",
+    "nearest_transmission_line_distance_m": "NEAREST_FEATURE",
+    "nearest_transmission_line_voltage_kv": "NEAREST_FEATURE",
+    "nearest_transmission_line_status": "NEAREST_FEATURE",
+    "nearest_major_road_distance_m": "NEAREST_FEATURE",
+}
+
+REFRESH_IDENTITY_FIELDS = (
+    "parcel_id",
+    "parcel_boundary_geojson",
+    "parcel_match_type",
+    "parcel_match_distance_m",
+)
+REFRESH_CONFIRMATION_TTL_SECONDS = 900
 
 SCENE_SCHEMA_VERSION = "1"
 EARTH_RADIUS_M = 6_371_008.8
@@ -204,9 +230,10 @@ def _coerce_location(value: dict[str, Any]) -> dict[str, Any] | None:
 class SiteSnapshotService:
     """Coordinates explicit resolution, quote, fetch, validation, and persistence."""
 
-    def __init__(self, store: WorkspaceStore, client: MireyeClient):
+    def __init__(self, store: WorkspaceStore, client: MireyeClient, scenarios: Any | None = None):
         self.store = store
         self.client = client
+        self.scenarios = scenarios
 
     async def resolve(
         self,
@@ -305,6 +332,223 @@ class SiteSnapshotService:
         self.store.create_site_snapshot(snapshot)
         return snapshot
 
+    async def select_fields(self, fields: list[str]) -> tuple[list[str], dict]:
+        """Validate a caller-planned field subset against the current MIREYE catalog."""
+        return await self._catalog_selection(fields)
+
+    def persist_dossier(
+        self,
+        *,
+        workspace_id: str,
+        lat: float,
+        lng: float,
+        fields: list[str],
+        catalog: dict,
+        quote: dict,
+        dossier: dict,
+        observed_at: float | None = None,
+    ) -> dict:
+        """Normalize one already-fetched batch result through normal snapshot identity checks."""
+        if dossier.get("ok") is False:
+            error = dossier.get("error") or {}
+            message = error.get("message") or error.get("code") or "MIREYE batch enrichment failed without a provider error message."
+            raise SandboxError(message)
+        timestamp = time.time() if observed_at is None else float(observed_at)
+        request = {"lat": float(lat), "lng": float(lng), "fields": list(fields)}
+        snapshot = self._build_snapshot(
+            workspace_id=workspace_id,
+            request=request,
+            dossier=dossier,
+            catalog=catalog,
+            quote=quote,
+            observed_at=timestamp,
+            selected_fields=fields,
+        )
+        self.store.create_site_snapshot(snapshot)
+        return snapshot
+
+    def freshness_status(
+        self,
+        snapshot_id: str,
+        *,
+        now: float | None = None,
+        test_expiry_overrides: dict[str, float] | None = None,
+        fields: list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
+        """Classify persisted evidence without changing its provider TTL metadata.
+
+        ``test_expiry_overrides`` exists only for explicit integration/demo refresh
+        exercises. It is in-memory, caller-supplied, and never persisted on T1.
+        """
+        snapshot = self.store.get_site_snapshot(snapshot_id)
+        if snapshot is None:
+            raise SandboxError("SiteSnapshot not found.")
+        current_time = time.time() if now is None else float(now)
+        records = []
+        checked_fields = list(fields) if fields is not None else list(snapshot.get("evidence", {}))
+        for field in checked_fields:
+            record = snapshot.get("evidence", {}).get(field)
+            override = (test_expiry_overrides or {}).get(field)
+            classification, reason = self._freshness_classification(
+                field, record, current_time, test_expires_at=override,
+            )
+            records.append({"field": field, "classification": classification, "reason": reason})
+        grouped = {
+            classification: [item["field"] for item in records if item["classification"] == classification]
+            for classification in ("fresh", "stale", "missing", "incompatible", "deprecated")
+        }
+        refresh_fields = sorted({item["field"] for item in records if item["classification"] != "fresh"})
+        return {
+            "snapshot_id": snapshot_id,
+            "site_id": snapshot.get("site_id"),
+            "checked_at": current_time,
+            "status": "CURRENT" if not refresh_fields else "STALE_EVIDENCE",
+            "fields": records,
+            "fresh_fields": grouped["fresh"],
+            "stale_fields": grouped["stale"],
+            "missing_fields": grouped["missing"],
+            "incompatible_fields": grouped["incompatible"],
+            "deprecated_fields": grouped["deprecated"],
+            "refresh_fields": refresh_fields,
+            "refresh_required": bool(refresh_fields),
+        }
+
+    async def quote_refresh(
+        self,
+        snapshot_id: str,
+        *,
+        now: float | None = None,
+        test_expiry_overrides: dict[str, float] | None = None,
+        fields: list[str] | tuple[str, ...] | None = None,
+    ) -> dict:
+        snapshot = self.store.get_site_snapshot(snapshot_id)
+        if snapshot is None:
+            raise SandboxError("SiteSnapshot not found.")
+        freshness = self.freshness_status(
+            snapshot_id, now=now, test_expiry_overrides=test_expiry_overrides, fields=fields,
+        )
+        if not freshness["refresh_required"]:
+            return {
+                "status": "NO_REFRESH_REQUIRED",
+                "snapshot_id": snapshot_id,
+                "site_id": snapshot.get("site_id"),
+                "freshness": freshness,
+                "expected_credits": 0,
+                "confirmation_required": False,
+            }
+
+        fields = sorted(set(freshness["refresh_fields"]) | set(REFRESH_IDENTITY_FIELDS))
+        try:
+            _selected_fields, catalog = await self._catalog_selection(fields)
+            quote = await self.client.fetch_quote(locations=1, fields=fields)
+        except httpx.HTTPError as exc:
+            raise MireyeUnavailableError("MIREYE refresh quote is temporarily unavailable.") from exc
+        created_at = time.time() if now is None else float(now)
+        dependencies = self.store.affected_scenario_constraints(snapshot.get("site_id"), fields) if snapshot.get("site_id") else []
+        affected_scenarios: dict[tuple[str, int], set[str]] = {}
+        for dependency in dependencies:
+            affected_scenarios.setdefault((dependency["scenario_id"], dependency["revision"]), set()).add(dependency["constraint_id"])
+        provider_expiry = quote.get("expires_at") or quote.get("quote_expires_at")
+        try:
+            quote_expires_at = float(provider_expiry) if provider_expiry is not None else created_at + REFRESH_CONFIRMATION_TTL_SECONDS
+            expiry_source = "mireye" if provider_expiry is not None else "application_confirmation_ttl"
+        except (TypeError, ValueError):
+            quote_expires_at, expiry_source = created_at + REFRESH_CONFIRMATION_TTL_SECONDS, "application_confirmation_ttl"
+        spend_plan_id = f"spend_{uuid.uuid4().hex}"
+        mireye_quote_id = quote.get("quote_id") or quote.get("id")
+        spend_plan = {
+            "spend_plan_id": spend_plan_id,
+            "workspace_id": snapshot["workspace_id"],
+            "site_id": snapshot.get("site_id"),
+            "snapshot_id": snapshot_id,
+            "status": "QUOTED",
+            "requested_fields": fields,
+            "candidate_site_count": 1,
+            "batch_strategy": "single_location",
+            "cache_hits": {"fresh_field_count": len(freshness["fresh_fields"]), "fresh_fields": freshness["fresh_fields"]},
+            "freshness_reason": {item["field"]: item["classification"] for item in freshness["fields"] if item["classification"] != "fresh"},
+            "field_catalog_version": self._catalog_version(catalog),
+            "quote": quote,
+            "quote_id": mireye_quote_id or spend_plan_id,
+            "mireye_quote_id": mireye_quote_id,
+            "quote_expires_at": quote_expires_at,
+            "quote_expiry_source": expiry_source,
+            "expected_credits": self._estimated_credits(quote),
+            "workspace_budget_impact": {
+                "policy": "explicit_application_confirmation_required",
+                "estimated_credits": self._estimated_credits(quote),
+                "remaining_budget": None,
+            },
+            "freshness": freshness,
+            "test_freshness_override_fields": sorted((test_expiry_overrides or {}).keys()),
+            "affected_scenarios": [
+                {
+                    "scenario_id": scenario_id,
+                    "revision": revision,
+                    "status": "STALE_EVIDENCE",
+                    "affected_constraint_ids": sorted(constraint_ids),
+                }
+                for (scenario_id, revision), constraint_ids in sorted(affected_scenarios.items())
+            ],
+            "created_at": created_at,
+            "confirmed_at": None,
+            "completed_at": None,
+        }
+        self.store.create_mireye_spend_plan(spend_plan)
+        return spend_plan
+
+    async def confirm_and_refresh(self, spend_plan_id: str, *, confirmed_by_application: bool) -> dict:
+        plan = self.store.get_mireye_spend_plan(spend_plan_id)
+        if plan is None:
+            raise SandboxError("MIREYE refresh spend plan was not found.")
+        if not confirmed_by_application:
+            raise ConfirmationRequired("MIREYE refresh requires explicit application confirmation.")
+        if plan["status"] != "QUOTED":
+            raise SandboxError("MIREYE refresh spend plan is no longer available for confirmation.")
+        if time.time() >= float(plan["quote_expires_at"]):
+            self.store.update_mireye_spend_plan(spend_plan_id, status="EXPIRED")
+            raise ConfirmationRequired("MIREYE refresh quote expired. Request a new quote before confirming.")
+
+        previous = self.store.get_site_snapshot(plan["snapshot_id"])
+        if previous is None:
+            raise SandboxError("SiteSnapshot not found.")
+        self.store.update_mireye_spend_plan(spend_plan_id, status="CONFIRMED")
+        fields = list(plan["requested_fields"])
+        try:
+            _selected_fields, catalog = await self._catalog_selection(fields)
+            point = previous["parcel_identity"]["selected_point"]
+            request = {"lat": float(point["lat"]), "lng": float(point["lng"]), "fields": fields}
+            dossier = await self.client.fetch(lat=request["lat"], lng=request["lng"], fields=fields)
+        except httpx.HTTPError as exc:
+            raise MireyeUnavailableError("MIREYE refresh fetch is temporarily unavailable.") from exc
+        if dossier.get("ok") is False:
+            message = dossier.get("error", {}).get("message", "MIREYE could not refresh this location.")
+            raise SandboxError(message)
+
+        refreshed = self._build_refreshed_snapshot(
+            previous=previous, request=request, dossier=dossier, catalog=catalog,
+            spend_plan=plan, observed_at=time.time(),
+        )
+        if refreshed["parcel_identity"]["parcel_id"] != previous["parcel_identity"]["parcel_id"]:
+            self.store.update_mireye_spend_plan(spend_plan_id, status="IDENTITY_MISMATCH")
+            raise ParcelIdentityError("MIREYE refresh resolved a different parcel_id; refresh stopped without creating a new SiteSnapshot.")
+        self.store.create_site_snapshot(refreshed)
+        diff = self.snapshot_diff(previous, refreshed)
+        evaluation_runs = []
+        if self.scenarios is not None:
+            evaluation_runs = self.scenarios.revalidate_after_refresh(previous, refreshed, diff)
+        completed_at = time.time()
+        self.store.update_mireye_spend_plan(spend_plan_id, status="COMPLETED", completed_at=completed_at)
+        completed_plan = self.store.get_mireye_spend_plan(spend_plan_id)
+        return {
+            "status": "REFRESHED",
+            "spend_plan": completed_plan,
+            "previous_snapshot_id": previous["snapshot_id"],
+            "snapshot": refreshed,
+            "snapshot_diff": diff,
+            "evaluation_runs": evaluation_runs,
+        }
+
     def get_snapshot(self, snapshot_id: str, *, now: float | None = None) -> dict | None:
         snapshot = self.store.get_site_snapshot(snapshot_id)
         if snapshot is not None:
@@ -322,16 +566,19 @@ class SiteSnapshotService:
         return (now if now is not None else time.time()) >= snapshot["expires_at"]
 
     async def _field_selection(self) -> tuple[list[str], dict]:
+        return await self._catalog_selection(list(SITE_SNAPSHOT_FIELDS))
+
+    async def _catalog_selection(self, fields: list[str]) -> tuple[list[str], dict]:
         catalog = await self.client.meta_fields()
         catalog_fields = {
             field.get("name"): field
             for field in catalog.get("fields", [])
             if isinstance(field, dict) and field.get("name")
         }
-        missing = [name for name in SITE_SNAPSHOT_FIELDS if name not in catalog_fields]
+        missing = [name for name in fields if name not in catalog_fields]
         if missing:
             raise FieldCatalogError(f"Current MIREYE catalog lacks required SiteSnapshot fields: {', '.join(missing)}")
-        return list(SITE_SNAPSHOT_FIELDS), catalog
+        return list(fields), catalog
 
     def _build_snapshot(
         self,
@@ -342,6 +589,7 @@ class SiteSnapshotService:
         catalog: dict,
         quote: dict,
         observed_at: float,
+        selected_fields: list[str] | tuple[str, ...] | None = None,
     ) -> dict:
         fields = dossier.get("fields")
         if not isinstance(fields, dict):
@@ -349,7 +597,7 @@ class SiteSnapshotService:
         identity = self._validate_identity(fields, request)
         geometry = self._geometry_from_fields(fields)
         catalog_fields = {field["name"]: field for field in catalog["fields"] if isinstance(field, dict) and field.get("name")}
-        evidence = self._normalize_evidence(fields, catalog_fields, observed_at)
+        evidence = self._normalize_evidence(fields, catalog_fields, observed_at, selected_fields=selected_fields)
         expires_at = min(record["expires_at"] for record in evidence.values())
 
         return {
@@ -374,6 +622,155 @@ class SiteSnapshotService:
             "expires_at": expires_at,
             "created_at": observed_at,
         }
+
+    def _build_refreshed_snapshot(
+        self,
+        *,
+        previous: dict,
+        request: dict,
+        dossier: dict,
+        catalog: dict,
+        spend_plan: dict,
+        observed_at: float,
+    ) -> dict:
+        fields = dossier.get("fields")
+        if not isinstance(fields, dict):
+            raise SandboxError("MIREYE refresh response did not include field records.")
+        catalog_fields = {
+            field["name"] for field in catalog.get("fields", [])
+            if isinstance(field, dict) and field.get("name")
+        }
+        refreshed_evidence = self._normalize_evidence(
+            fields,
+            {field["name"]: field for field in catalog["fields"] if isinstance(field, dict) and field.get("name")},
+            observed_at,
+            selected_fields=spend_plan["requested_fields"],
+        )
+        evidence = copy.deepcopy(previous["evidence"])
+        for name, record in evidence.items():
+            if name not in refreshed_evidence:
+                record["carried_from_snapshot_id"] = record.get("carried_from_snapshot_id") or previous["snapshot_id"]
+        evidence.update(refreshed_evidence)
+        missing_catalog_fields = [name for name in spend_plan["requested_fields"] if name not in catalog_fields]
+        if missing_catalog_fields:
+            raise FieldCatalogError(f"Current MIREYE catalog lacks refresh fields: {', '.join(missing_catalog_fields)}")
+        identity = self._validate_identity(evidence, request)
+        geometry = self._geometry_from_fields(evidence)
+        expires_at = min(record["expires_at"] for record in evidence.values())
+        return {
+            "snapshot_id": f"site_{uuid.uuid4().hex}",
+            "site_id": previous.get("site_id"),
+            "workspace_id": previous["workspace_id"],
+            "parcel_identity": identity,
+            "geometry": geometry,
+            "evidence": evidence,
+            "raw_response": dossier,
+            "raw_response_hash": _hash(dossier),
+            "request": request,
+            "request_hash": _hash(request),
+            "field_catalog_version": self._catalog_version(catalog),
+            "provider_metadata": {
+                "provider": "mireye",
+                "mode": self.client.mode,
+                "base_url": self.client.base_url,
+                "mireye_snapshot_ts": dossier.get("snapshot_ts"),
+                "refresh": {
+                    "previous_snapshot_id": previous["snapshot_id"],
+                    "spend_plan_id": spend_plan["spend_plan_id"],
+                    "quote": spend_plan["quote"],
+                    "requested_fields": spend_plan["requested_fields"],
+                },
+            },
+            "observed_at": observed_at,
+            "expires_at": expires_at,
+            "created_at": observed_at,
+        }
+
+    @staticmethod
+    def _freshness_classification(
+        field: str,
+        record: Any,
+        now: float,
+        *,
+        test_expires_at: float | None = None,
+    ) -> tuple[str, str]:
+        if not isinstance(record, dict):
+            return "missing", "Evidence record is missing."
+        if str(record.get("lifecycle", "")).lower() == "deprecated":
+            return "deprecated", "Field is deprecated in its captured catalog metadata."
+        if record.get("value") is None:
+            return "missing", "Evidence value is null or absent."
+        if record.get("status") not in {"ok", None}:
+            return "incompatible", f"Evidence status is not usable: {record.get('status')}."
+        expected_scope = SITE_SNAPSHOT_FIELD_SCOPES.get(field)
+        if expected_scope and record.get("scope") not in {expected_scope, None}:
+            return "incompatible", f"Evidence scope is {record.get('scope')}, not {expected_scope}."
+        try:
+            expires_at = float(test_expires_at if test_expires_at is not None else record["expires_at"])
+        except (KeyError, TypeError, ValueError):
+            return "incompatible", "Evidence has invalid freshness metadata."
+        if now >= expires_at:
+            return "stale", "Test-time local expiration override has expired." if test_expires_at is not None else "Evidence TTL has expired."
+        return "fresh", "Evidence is usable and within its field-level TTL."
+
+    @staticmethod
+    def _estimated_credits(quote: dict) -> float | int | None:
+        for key in ("estimated_credits", "credits", "total_credits", "credits_total", "credits_per_location"):
+            value = quote.get(key)
+            if isinstance(value, (int, float)):
+                return value
+        estimate = quote.get("estimate")
+        if isinstance(estimate, dict):
+            return SiteSnapshotService._estimated_credits(estimate)
+        return None
+
+    @staticmethod
+    def snapshot_diff(previous: dict, refreshed: dict) -> dict:
+        identity_fields = (
+            "parcel_id", "parcel_apn", "parcel_address", "parcel_data_source",
+            "parcel_match_type", "parcel_match_distance_m", "parcel_match_radius_m",
+        )
+        identity_changes = {
+            field: {"before": previous["parcel_identity"].get(field), "after": refreshed["parcel_identity"].get(field)}
+            for field in identity_fields
+            if previous["parcel_identity"].get(field) != refreshed["parcel_identity"].get(field)
+        }
+        previous_evidence, refreshed_evidence = previous.get("evidence", {}), refreshed.get("evidence", {})
+        field_changes = {}
+        changed_evidence_ids = []
+        for field in sorted(set(previous_evidence) | set(refreshed_evidence)):
+            before, after = previous_evidence.get(field), refreshed_evidence.get(field)
+            before_hash = SiteSnapshotService._evidence_hash(before) if before is not None else None
+            after_hash = SiteSnapshotService._evidence_hash(after) if after is not None else None
+            changed = before_hash != after_hash
+            if changed:
+                changed_evidence_ids.append(field)
+                field_changes[field] = {
+                    "value": {"before": before.get("value") if isinstance(before, dict) else None, "after": after.get("value") if isinstance(after, dict) else None},
+                    "status": {"before": before.get("status") if isinstance(before, dict) else None, "after": after.get("status") if isinstance(after, dict) else None},
+                    "scope": {"before": before.get("scope") if isinstance(before, dict) else None, "after": after.get("scope") if isinstance(after, dict) else None},
+                    "freshness": {"before": before.get("expires_at") if isinstance(before, dict) else None, "after": after.get("expires_at") if isinstance(after, dict) else None},
+                    "evidence_hash": {"before": before_hash, "after": after_hash},
+                }
+        previous_geometry_hash, refreshed_geometry_hash = _hash(previous["geometry"]), _hash(refreshed["geometry"])
+        return {
+            "diff_version": "site_snapshot_diff_v1",
+            "previous_snapshot_id": previous["snapshot_id"],
+            "refreshed_snapshot_id": refreshed["snapshot_id"],
+            "identity_changed": bool(identity_changes),
+            "identity_changes": identity_changes,
+            "geometry_changed": previous_geometry_hash != refreshed_geometry_hash,
+            "geometry_hash": {"before": previous_geometry_hash, "after": refreshed_geometry_hash},
+            "field_changes": field_changes,
+            "changed_evidence_ids": changed_evidence_ids,
+        }
+
+    @staticmethod
+    def _evidence_hash(record: dict) -> str:
+        declared = record.get("evidence_hash")
+        if isinstance(declared, str) and declared:
+            return declared
+        return _hash({key: value for key, value in record.items() if key not in {"carried_from_snapshot_id", "evidence_hash"}})
 
     @staticmethod
     def _catalog_version(catalog: dict) -> str:
@@ -430,14 +827,16 @@ class SiteSnapshotService:
         }
 
     @staticmethod
-    def _normalize_evidence(fields: dict[str, Any], catalog_fields: dict[str, dict], observed_at: float) -> dict[str, dict]:
+    def _normalize_evidence(
+        source_fields: dict[str, Any], catalog_fields: dict[str, dict], observed_at: float, *, selected_fields: list[str] | tuple[str, ...] | None = None
+    ) -> dict[str, dict]:
         evidence = {}
-        for name in SITE_SNAPSHOT_FIELDS:
-            source_record = fields.get(name)
+        for name in selected_fields or SITE_SNAPSHOT_FIELDS:
+            source_record = source_fields.get(name)
             record = source_record if isinstance(source_record, dict) else {"value": source_record}
             metadata = catalog_fields[name]
             ttl_seconds = int(metadata.get("ttl_seconds") or 0)
-            evidence[name] = {
+            normalized = {
                 "field": name,
                 "value": record.get("value"),
                 "status": record.get("status", "absent" if source_record is None else "ok"),
@@ -445,8 +844,11 @@ class SiteSnapshotService:
                 "source": record.get("source") or metadata.get("source"),
                 "unit": record.get("unit") or metadata.get("unit"),
                 "lifecycle": metadata.get("lifecycle"),
+                "scope": metadata.get("scope") or metadata.get("spatial_scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(name),
                 "ttl_seconds": ttl_seconds,
                 "observed_at": observed_at,
                 "expires_at": observed_at + ttl_seconds,
             }
+            normalized["evidence_hash"] = _hash(normalized)
+            evidence[name] = normalized
         return evidence

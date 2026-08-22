@@ -1,692 +1,121 @@
-<!DOCTYPE html>
-<html lang="en" data-theme="light">
+<!doctype html>
+<html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Mireye — Physical World Context for AI Agents</title>
-  <meta name="description" content="Mireye delivers high-fidelity, provenance-tagged geospatial data and agentic siting memory for autonomous AI agents.">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="Describe a physical site problem and evaluate real properties with MIREYE intelligence.">
+  <link rel="icon" href="data:,">
+  <title>Mireye | Physical-world intelligence</title>
   <link rel="stylesheet" href="/static/style.css">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><rect fill='%23FF6600' width='100' height='100' rx='20'/><path d='M25,25 L75,25 L65,75 L15,75 Z' fill='%23FFFFFF'/></svg>">
 </head>
-<body>
-
-  <!-- Technical Dithered Background Pattern -->
-  <div class="grid-background"></div>
-
-  <!-- Header -->
-  <header class="app-header">
-    <div class="header-inner">
-      <div class="brand-wrapper">
-        <!-- Mireye "M" Glyph Brand Mark -->
-        <svg class="brand-logo-svg" viewBox="0 0 400 400" xmlns="http://www.w3.org/2000/svg">
-          <rect width="400" height="400" fill="var(--bg-sunken)" rx="10"/>
-          <path fill-rule="evenodd" clip-rule="evenodd" fill="currentColor" d="M148.77 89.72C176.93 89.72 205.08 89.72 233.24 89.72C233.22 125.58 233.24 161.45 233.29 197.31C246.35 182.35 259.37 167.36 272.34 152.34C297.85 152.29 323.36 152.27 348.88 152.29C348.89 189.83 348.88 227.37 348.82 264.91C335.65 279.97 322.52 295.08 309.44 310.21C283.93 310.27 258.41 310.29 232.9 310.27C232.92 272.95 232.9 235.63 232.85 198.32C200.47 235.65 168.05 272.94 135.59 310.21C107.43 310.27 79.28 310.29 51.12 310.27C51.11 274.22 51.12 238.17 51.18 202.12C83.73 164.66 116.27 127.2 148.77 89.72Z"/>
-        </svg>
-
-        <div class="brand-title">
-          Mireye
-        </div>
-        <div class="brand-tagline-badge">
-          Physical world context for AI agents
-        </div>
-      </div>
-
-      <!-- Navigation Tabs -->
-      <nav class="nav-tabs" role="tablist">
-        <button class="nav-tab-btn active" data-tab="tab-screen" id="tabBtnScreen">
-          <span class="tab-num">01.</span> Screen
-        </button>
-        <button class="nav-tab-btn" data-tab="tab-ask" id="tabBtnAsk">
-          <span class="tab-num">02.</span> Point Dossier
-        </button>
-        <button class="nav-tab-btn" data-tab="tab-grid" id="tabBtnGrid">
-          <span class="tab-num">03.</span> Grid & ICI
-        </button>
-        <button class="nav-tab-btn" data-tab="tab-workspace" id="tabBtnWorkspace">
-          <span class="tab-num">04.</span> Workspaces
-        </button>
-        <button class="nav-tab-btn" data-tab="tab-api" id="tabBtnApi">
-          <span class="tab-num">05.</span> API & MCP
-        </button>
-      </nav>
-
-      <!-- Header Actions -->
-      <div class="header-actions">
-        <div class="live-indicator" id="liveStatusBadge">
-          <div class="live-dot"></div>
-          <span id="liveStatusText">LIVE API (306 FIELDS)</span>
-        </div>
-        <button class="theme-toggle-btn" id="themeToggleBtn" title="Toggle Dark/Light Mode">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-            <circle cx="12" cy="12" r="5"></circle>
-            <line x1="12" y1="1" x2="12" y2="3"></line>
-            <line x1="12" y1="21" x2="12" y2="23"></line>
-            <line x1="4.22" y1="4.22" x2="5.64" y2="5.64"></line>
-            <line x1="18.36" y1="18.36" x2="19.78" y2="19.78"></line>
-            <line x1="1" y1="12" x2="3" y2="12"></line>
-            <line x1="21" y1="12" x2="23" y2="12"></line>
-            <line x1="4.22" y1="19.78" x2="5.64" y2="18.36"></line>
-            <line x1="18.36" y1="5.64" x2="19.78" y2="4.22"></line>
-          </svg>
-        </button>
-      </div>
-    </div>
+<body class="home-page">
+  <header class="product-header">
+    <a class="product-brand" href="/" aria-label="Mireye home">
+      <span class="product-mark" aria-hidden="true">M</span>
+      <span>Mireye</span>
+    </a>
+    <span class="header-caption">Physical-world intelligence</span>
   </header>
 
-  <!-- Metrics Ticker Bar -->
-  <div class="metrics-ticker">
-    <div class="metrics-ticker-inner">
-      <div class="ticker-item">
-        <span class="ticker-label">FIELD CATALOG</span>
-        <span class="ticker-value">306 Active <span class="ticker-badge">USGS·FEMA·NOAA</span></span>
-      </div>
-      <div class="ticker-item">
-        <span class="ticker-label">SPATIAL INDEX</span>
-        <span class="ticker-value">DuckDB Vector <span class="ticker-badge">H3 RES-7</span></span>
-      </div>
-      <div class="ticker-item">
-        <span class="ticker-label">SUBSTATION CAPACITY</span>
-        <span class="ticker-value">SCD Dynamics <span class="ticker-badge">FERC 2023</span></span>
-      </div>
-      <div class="ticker-item">
-        <span class="ticker-label">AGENTIC MEMORY</span>
-        <span class="ticker-value">Stateful Replay <span class="ticker-badge">SQLite v1</span></span>
-      </div>
-    </div>
-  </div>
+  <main class="home-main">
+    <section class="prompt-section" aria-labelledby="homeTitle">
+      <p class="eyebrow">Site intelligence, grounded in cited data</p>
+      <h1 id="homeTitle">What are you looking for?</h1>
+      <p class="home-intro">Describe a site, property, or project. Mireye will resolve the location, check the available evidence, and show what can be proven.</p>
 
-  <!-- Main Content Areas -->
-  <main class="app-main">
-
-    <!-- ====================================================================
-         TAB 01: DISCOVERY ENGINE (POST /v1/screen)
-         ==================================================================== -->
-    <div class="tab-pane active" id="tab-screen">
-      <div class="panel-grid">
-        
-        <!-- Left: Constraint Filter Sidebar -->
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <div class="card-title">
-                <span class="mono" style="color:var(--mandarin-orange)">01.</span> Precision Constraints
-              </div>
-              <div class="card-subtitle">Inverse Candidate Search</div>
-            </div>
-            <button class="btn btn-secondary btn-sm" id="btnResetFilters">Reset</button>
-          </div>
-          <div class="card-body">
-            
-            <!-- Preset Quick Selection -->
-            <div class="form-group">
-              <label class="form-label">Siting Archetype Preset</label>
-              <div class="chip-group" id="presetChips">
-                <div class="chip active" data-preset="solar_siting">Solar PV</div>
-                <div class="chip" data-preset="storage_siting">BESS Storage</div>
-                <div class="chip" data-preset="data_center_siting">Data Center</div>
-                <div class="chip" data-preset="wind_siting">Wind Energy</div>
-              </div>
-            </div>
-
-            <!-- Acreage Slider -->
-            <div class="form-group">
-              <div class="form-label">
-                <span>Min Acreage</span>
-                <span class="form-label-val" id="valAcreage">50 Acres</span>
-              </div>
-              <input type="range" class="range-slider" id="inputAcreage" min="5" max="500" value="50" step="5">
-            </div>
-
-            <!-- Max Slope Slider -->
-            <div class="form-group">
-              <div class="form-label">
-                <span>Max Slope (USGS 3DEP)</span>
-                <span class="form-label-val" id="valSlope">8.0%</span>
-              </div>
-              <input type="range" class="range-slider" id="inputSlope" min="1" max="25" value="8" step="0.5">
-            </div>
-
-            <!-- Flood Zone Chips -->
-            <div class="form-group">
-              <label class="form-label">Allowed FEMA Flood Zones</label>
-              <div class="chip-group" id="floodZoneChips">
-                <div class="chip active" data-zone="X">Zone X (Minimal)</div>
-                <div class="chip" data-zone="AE">Zone AE (100-yr)</div>
-                <div class="chip" data-zone="A">Zone A</div>
-              </div>
-            </div>
-
-            <!-- Min Substation Capacity -->
-            <div class="form-group">
-              <div class="form-label">
-                <span>Min Substation Capacity</span>
-                <span class="form-label-val" id="valCapacity">50 MW</span>
-              </div>
-              <input type="range" class="range-slider" id="inputCapacity" min="10" max="300" value="50" step="10">
-            </div>
-
-            <!-- Max Substation Distance -->
-            <div class="form-group">
-              <div class="form-label">
-                <span>Max Gen-Tie Distance</span>
-                <span class="form-label-val" id="valDistance">15 km</span>
-              </div>
-              <input type="range" class="range-slider" id="inputDistance" min="1" max="40" value="15" step="1">
-            </div>
-
-            <!-- Renewable Permitted Switch -->
-            <div class="form-group">
-              <div class="switch-wrapper">
-                <span class="mono" style="font-size:0.75rem; font-weight:600">Renewable Permitted Zoning</span>
-                <input type="checkbox" id="checkZoning" checked style="accent-color:var(--mandarin-orange); width:18px; height:18px">
-              </div>
-            </div>
-
-            <!-- Submit Button -->
-            <button class="btn btn-accent btn-block" id="btnRunScreen">
-              RUN SPATIAL SCREENING →
-            </button>
-
-          </div>
+      <form class="prompt-composer" id="requestForm">
+        <label class="sr-only" for="requestInput">Describe what you want to find or build</label>
+        <textarea id="requestInput" rows="5" maxlength="4000" placeholder="Find me a site for a 100 MW data center in Texas with low flood risk, close to transmission and good road access..." required></textarea>
+        <div class="candidate-input">
+          <label for="candidateInput">Candidate properties <span>optional, one address, coordinate, or APN per line</span></label>
+          <textarea id="candidateInput" rows="3" maxlength="20000" placeholder="1 Broker Road, Dallas, TX&#10;32.7767, -96.7970&#10;APN: 123-456-789"></textarea>
         </div>
-
-        <!-- Right: Map Canvas + Shortlist Results -->
-        <div style="display:flex; flex-direction:column; gap:1.25rem;">
-          
-          <!-- Dithered Spatial Map Canvas HUD -->
-          <div class="map-canvas-container">
-            <canvas id="spatialCanvas"></canvas>
-            <div class="canvas-overlay-hud">
-              <div>REGION: <span style="color:var(--mandarin-orange)">TEXAS CONUS</span></div>
-              <div>SCAN: <span id="hudCandidateCount">2,500 PARCELS</span></div>
-              <div>MODE: <span id="hudMode">DUCKDB SPATIAL VECTOR</span></div>
-            </div>
-            <div class="canvas-legend">
-              <span style="display:flex; align-items:center; gap:4px">
-                <span class="legend-dot" style="background:#FF6600"></span> Candidate
-              </span>
-              <span style="display:flex; align-items:center; gap:4px">
-                <span class="legend-dot" style="background:#FFFFFF"></span> Substation
-              </span>
-              <span style="display:flex; align-items:center; gap:4px">
-                <span class="legend-dot" style="background:#71717A"></span> Gen-Tie Path
-              </span>
-            </div>
-          </div>
-
-          <!-- Shortlist Results Table Card -->
-          <div class="card">
-            <div class="card-header">
-              <div>
-                <div class="card-title">
-                  <span class="mono" style="color:var(--mandarin-orange)">02.</span> Candidate Shortlist
-                </div>
-                <div class="card-subtitle" id="shortlistMetaText">Matching rule constraints</div>
-              </div>
-              <div class="mono" style="font-size:0.75rem; color:var(--text-muted)">
-                Sorted by <span style="color:var(--mandarin-orange); font-weight:700">Confidence Score</span>
-              </div>
-            </div>
-            <div class="table-container">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Parcel ID</th>
-                    <th>Coordinates</th>
-                    <th>Acreage</th>
-                    <th>Slope</th>
-                    <th>FEMA Flood</th>
-                    <th>Substation Dist</th>
-                    <th>Trust Score</th>
-                    <th>Action</th>
-                  </tr>
-                </thead>
-                <tbody id="shortlistTableBody">
-                  <!-- Injected dynamically by JS -->
-                </tbody>
-              </table>
-            </div>
-          </div>
-
+        <div class="composer-footer">
+          <span class="composer-source"><i></i>MIREYE site intelligence</span>
+          <button class="primary-button" id="runButton" type="submit">Run <span aria-hidden="true">→</span></button>
         </div>
+      </form>
 
+      <div class="prompt-examples" aria-label="Example requests">
+        <span>Try</span>
+        <button type="button">Compare 3 sites for a 100 MW data center</button>
+        <button type="button">Diligence 1600 Pennsylvania Avenue NW, Washington, DC</button>
+        <button type="button">Show me what I could build at 38.8977, -77.0365</button>
+        <button type="button">Find land for a solar farm</button>
       </div>
-    </div>
+    </section>
 
-
-    <!-- ====================================================================
-         TAB 02: POINT DOSSIER & PROVENANCE (POST /v1/ask)
-         ==================================================================== -->
-    <div class="tab-pane" id="tab-ask">
-      
-      <!-- Search Bar Card -->
-      <div class="card" style="margin-bottom: 1.5rem">
-        <div class="card-body" style="padding: 1.25rem">
-          <div style="display:grid; grid-template-columns: 1fr 1fr auto auto; gap: 1rem; align-items: flex-end">
-            <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">Latitude</label>
-              <input type="number" class="form-input" id="askLat" value="32.7767" step="0.0001">
-            </div>
-            <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">Longitude</label>
-              <input type="number" class="form-input" id="askLng" value="-96.7970" step="0.0001">
-            </div>
-            <div class="form-group" style="margin-bottom:0">
-              <label class="form-label">Preset</label>
-              <select class="form-select" id="askPresetSelect">
-                <option value="site_selection">site_selection (Universal)</option>
-                <option value="solar_siting" selected>solar_siting</option>
-                <option value="data_center_siting">data_center_siting</option>
-                <option value="storage_siting">storage_siting</option>
-                <option value="flood_risk">flood_risk</option>
-                <option value="terrain">terrain</option>
-              </select>
-            </div>
-            <button class="btn btn-accent" id="btnAskVerify" style="height:38px">
-              VERIFY PARCEL FACTS →
-            </button>
-          </div>
-        </div>
+    <section class="work-section" id="workSection" aria-live="polite" hidden>
+      <div class="request-summary" id="requestSummary" hidden>
+        <p class="section-kicker">Understood</p>
+        <div class="summary-tags" id="summaryTags"></div>
       </div>
 
-      <!-- Dossier Summary Bar -->
-      <div class="dossier-header-card" id="dossierHeaderCard">
+      <ol class="progress-list" id="progressList" aria-label="Analysis progress"></ol>
+
+      <div class="product-notice" id="notice" hidden>
+        <span class="notice-icon" aria-hidden="true">i</span>
+        <div><h2 id="noticeTitle">A little more information</h2><p id="noticeMessage"></p></div>
+      </div>
+
+      <section class="property-handoff" id="propertyHandoff" hidden aria-labelledby="propertyHandoffTitle">
         <div>
-          <div style="display:flex; align-items:center; gap:0.75rem; margin-bottom:0.3rem">
-            <span class="mono" style="font-size:1.1rem; font-weight:800" id="dossierParcelId">PCL-TEXAS-SELECTED</span>
-            <span class="badge badge-green" id="dossierStatusBadge">STATUS: OK</span>
-            <span class="badge badge-orange" id="dossierVintageBadge">VINTAGE 2026-Q2</span>
-          </div>
-          <div class="mono" style="font-size:0.75rem; color:var(--text-muted)" id="dossierCoordsText">
-            LAT: 32.7767 | LNG: -96.7970 | H3: 872681545ffffff
-          </div>
+          <p class="section-kicker">Analyze a real property</p>
+          <h2 id="propertyHandoffTitle">Have an address or coordinates?</h2>
+          <p>Use this property to check the request now. A wider search needs a parcel source that can enumerate candidates.</p>
         </div>
-        <div style="display:flex; gap:2rem; align-items:center">
-          <div style="text-align:right">
-            <div class="mono" style="font-size:0.7rem; color:var(--text-muted)">OVERALL CONFIDENCE</div>
-            <div class="mono" style="font-size:1.4rem; font-weight:800; color:var(--mandarin-orange)" id="dossierConfidenceScore">
-              0.94 / 1.0
-            </div>
+        <form class="property-handoff-form" id="propertyHandoffForm">
+          <label for="propertyHandoffInput">Property address or coordinates</label>
+          <div>
+            <input id="propertyHandoffInput" type="text" autocomplete="street-address" placeholder="1600 Pennsylvania Avenue NW, Washington, DC">
+            <button class="primary-button" type="submit">Analyze property <span aria-hidden="true">&rarr;</span></button>
           </div>
-          <button class="btn btn-dark btn-sm" id="btnObserveFromDossier">+ Observe to Workspace</button>
-        </div>
+        </form>
+      </section>
+
+      <div class="choice-list" id="choiceList" hidden></div>
+
+      <div class="project-panel" id="projectPanel" hidden>
+        <div><p class="section-kicker">Customer-supplied shortlist</p><h2 id="projectTitle">Candidates ready</h2><p id="projectText"></p></div>
+        <button class="primary-button" id="projectPlanButton" type="button">Resolve with MIREYE</button>
       </div>
 
-      <!-- Provenance Cards Grid -->
-      <div class="provenance-grid" id="provenanceGrid">
-        <!-- Dynamically injected cards -->
+      <div class="confirmation-panel" id="confirmationPanel" hidden>
+        <div>
+          <p class="section-kicker">Ready to check this property</p>
+          <h2>MIREYE site intelligence</h2>
+          <p id="confirmationText"></p>
+          <p class="confirmation-assurance">Nothing is charged until you confirm.</p>
+        </div>
+        <button class="primary-button" id="confirmButton" type="button">Continue with MIREYE</button>
       </div>
 
-    </div>
-
-
-    <!-- ====================================================================
-         TAB 03: INTERCONNECTION CAPACITY INTELLIGENCE (ICI) (GET /v1/grid)
-         ==================================================================== -->
-    <div class="tab-pane" id="tab-grid">
-      <div class="panel-grid">
-        
-        <!-- Left: ICI Query Parameters -->
-        <div class="card">
-          <div class="card-header">
-            <div>
-              <div class="card-title">
-                <span class="mono" style="color:var(--mandarin-orange)">03.</span> Grid Dynamics (SCD)
-              </div>
-              <div class="card-subtitle">Substation & Queue Modeling</div>
-            </div>
-          </div>
-          <div class="card-body">
-            
-            <div class="form-group">
-              <label class="form-label">Substation Target Node</label>
-              <select class="form-select" id="gridSubSelect">
-                <option value="Clear Creek 345kV">Clear Creek 345kV (ERCOT North)</option>
-                <option value="Oak Hill 138kV">Oak Hill 138kV (ERCOT East)</option>
-                <option value="Trinity Ridge 500kV">Trinity Ridge 500kV (ERCOT Hub)</option>
-                <option value="Prairie View 138kV">Prairie View 138kV (ERCOT South)</option>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <div class="form-label">
-                <span>Target Facility Capacity</span>
-                <span class="form-label-val" id="valTargetMw">75 MW</span>
-              </div>
-              <input type="range" class="range-slider" id="inputTargetMw" min="10" max="250" value="75" step="5">
-            </div>
-
-            <div class="form-group">
-              <div class="form-label">
-                <span>Terrain Slope Barrier</span>
-                <span class="form-label-val" id="valGridSlope">3.2%</span>
-              </div>
-              <input type="range" class="range-slider" id="inputGridSlope" min="0" max="20" value="3.2" step="0.5">
-            </div>
-
-            <div class="form-group">
-              <div class="form-label">
-                <span>Wetlands Encroachment</span>
-                <span class="form-label-val" id="valWetlands">2.5%</span>
-              </div>
-              <input type="range" class="range-slider" id="inputWetlands" min="0" max="30" value="2.5" step="0.5">
-            </div>
-
-            <button class="btn btn-accent btn-block" id="btnRunGridAnalysis">
-              CALCULATE HEADROOM DYNAMICS →
-            </button>
-
-          </div>
+      <div class="results" id="results" hidden>
+        <div class="results-heading">
+          <div><p class="section-kicker">Verified property</p><h2>Candidate sites</h2></div>
+          <label class="sort-control">Sort <select aria-label="Sort candidates"><option>Best match</option></select></label>
         </div>
-
-        <!-- Right: Capacity Modeling & ROW Radar -->
-        <div style="display:flex; flex-direction:column; gap:1.25rem;">
-          
-          <!-- Substation Dynamics Card -->
-          <div class="card">
-            <div class="card-header">
-              <div>
-                <div class="card-title" id="iciSubName">Clear Creek 345kV Substation</div>
-                <div class="card-subtitle" id="iciSubMeta">Voltage: 345 kV | Distance: 2.4 km | ISO: ERCOT</div>
-              </div>
-              <span class="badge badge-green" id="iciFeasibilityBadge">FEASIBLE (FIRM HEADROOM)</span>
-            </div>
-            <div class="card-body">
-              
-              <!-- Stacked Capacity Dynamics Bar -->
-              <div class="scd-bar-container">
-                <div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:0.75rem; margin-bottom:0.4rem">
-                  <span>CAPACITY BREAKDOWN (MW)</span>
-                  <span id="iciTotalCapacityText">Total Nameplate: 600 MW</span>
-                </div>
-                
-                <div class="scd-stacked-bar">
-                  <div class="scd-segment-firm" id="scdBarFirm" style="width: 30%" title="Firm Headroom">
-                    Firm: 180 MW
-                  </div>
-                  <div class="scd-segment-contested" id="scdBarContested" style="width: 42%" title="Contested Headroom">
-                    Contested: 250 MW
-                  </div>
-                  <div class="scd-segment-freed" id="scdBarFreed" style="width: 28%" title="Freed Capacity by Attrition">
-                    Freed (~72% Attrition): 180 MW
-                  </div>
-                </div>
-
-                <div style="display:flex; gap:1rem; font-family:var(--font-mono); font-size:0.7rem; color:var(--text-muted)">
-                  <span><strong style="color:var(--mandarin-orange)">■</strong> Firm Headroom</span>
-                  <span><strong style="color:#71717A">■</strong> Contested Queue</span>
-                  <span><strong>■</strong> FERC 2023 Attrition Freed</span>
-                </div>
-              </div>
-
-              <!-- Right-of-Way (ROW) Feasibility Checklist -->
-              <div style="margin-top:1.5rem">
-                <div class="mono" style="font-size:0.8rem; font-weight:700; text-transform:uppercase; margin-bottom:0.6rem">
-                  Right-of-Way (ROW) Barrier Audit
-                </div>
-                
-                <div class="row-barrier-checklist" id="rowBarrierList">
-                  <div class="row-barrier-item">
-                    <span>Gen-Tie Transmission Run (<span id="rowDistKm">2.4 km</span>)</span>
-                    <span class="badge badge-green">CLEAR (< $1.1M)</span>
-                  </div>
-                  <div class="row-barrier-item">
-                    <span>Topographic Slope Crossing (<span id="rowSlopeVal">3.2%</span>)</span>
-                    <span class="badge badge-green">OPTIMAL</span>
-                  </div>
-                  <div class="row-barrier-item">
-                    <span>USFWS National Wetlands Incursion</span>
-                    <span class="badge badge-green">NONE DETECTED</span>
-                  </div>
-                  <div class="row-barrier-item">
-                    <span>EPA Superfund Facility Buffer</span>
-                    <span class="badge badge-green">> 10 KM BUFFER</span>
-                  </div>
-                </div>
-              </div>
-
-            </div>
+        <div id="candidateList"></div>
+        <section class="project-agent" id="projectAgent" hidden aria-labelledby="projectAgentTitle">
+          <div class="project-agent-heading">
+            <div><p class="section-kicker">MIREYE diligence agent</p><h3 id="projectAgentTitle">Ask about this shortlist</h3></div>
+            <div class="project-agent-actions"><button type="button" id="watchProject">Watch shortlist</button><button type="button" id="checkProject">Check freshness</button></div>
           </div>
-
-          <!-- Token-Compressed LLM Output Card -->
-          <div class="code-terminal">
-            <div class="terminal-header">
-              <div style="display:flex; align-items:center; gap:0.5rem">
-                <div class="terminal-dots">
-                  <span class="terminal-dot"></span>
-                  <span class="terminal-dot"></span>
-                  <span class="terminal-dot"></span>
-                </div>
-                <span style="font-size:0.72rem; color:#A1A1AA">80% Context-Compressed Agent Payload (JSON)</span>
-              </div>
-              <span class="badge badge-orange">ZERO BOILERPLATE</span>
-            </div>
-            <div class="terminal-body">
-              <pre><code id="compressedJsonPayload">// Compressed LLM Agent Payload will appear here</code></pre>
-            </div>
-          </div>
-
-        </div>
-
+          <form id="projectChatForm">
+            <label class="sr-only" for="projectChatInput">Ask about the ranked candidates</label>
+            <input id="projectChatInput" type="text" maxlength="4000" placeholder="Why is the top site stronger? What remains unresolved?">
+            <button class="primary-button" type="submit">Ask</button>
+          </form>
+          <p id="projectAgentResponse" aria-live="polite"></p>
+        </section>
       </div>
-    </div>
-
-
-    <!-- ====================================================================
-         TAB 04: AGENTIC WORKSPACE MEMORY (/v1/workspace/*)
-         ==================================================================== -->
-    <div class="tab-pane" id="tab-workspace">
-      
-      <!-- Time-Travel Replay & Workspace Action Header -->
-      <div class="replay-scrubber-bar">
-        <div style="display:flex; align-items:center; gap:0.75rem">
-          <span class="mono" style="font-weight:700; font-size:0.85rem">ACTIVE WORKSPACE:</span>
-          <select class="form-select" id="workspaceSelect" style="width:220px">
-            <option value="ws_texas_solar">Texas Solar Pipeline v1</option>
-            <option value="ws_ercot_storage">ERCOT BESS Origination</option>
-            <option value="ws_demo">Autonomous Siting Epoch 4</option>
-          </select>
-        </div>
-
-        <div style="display:flex; align-items:center; gap:0.75rem; flex:1">
-          <span class="mono" style="font-size:0.75rem; color:var(--text-muted)">REPLAY (TIME-TRAVEL):</span>
-          <input type="range" class="range-slider" id="replayScrubber" min="0" max="100" value="100">
-          <span class="mono" style="font-size:0.75rem; font-weight:700; color:var(--mandarin-orange)" id="replayTimeText">LIVE HEAD</span>
-        </div>
-
-        <div style="display:flex; gap:0.5rem">
-          <button class="btn btn-secondary btn-sm" id="btnCheckStaleness">⚡ Invalidate Check</button>
-          <button class="btn btn-accent btn-sm" id="btnOpenObserveModal">+ Observe Site</button>
-        </div>
-      </div>
-
-      <!-- 3-Column Kanban Board -->
-      <div class="workspace-kanban">
-        
-        <!-- Column 1: Shortlisted -->
-        <div class="kanban-col">
-          <div class="kanban-col-header">
-            <span style="color:var(--mandarin-orange)">★ Shortlisted</span>
-            <span class="kanban-count" id="countShortlisted">0</span>
-          </div>
-          <div class="kanban-cards-list" id="colShortlisted">
-            <!-- Cards injected dynamically -->
-          </div>
-        </div>
-
-        <!-- Column 2: Candidates -->
-        <div class="kanban-col">
-          <div class="kanban-col-header">
-            <span>● Active Candidates</span>
-            <span class="kanban-count" id="countCandidates">0</span>
-          </div>
-          <div class="kanban-cards-list" id="colCandidates">
-            <!-- Cards injected dynamically -->
-          </div>
-        </div>
-
-        <!-- Column 3: Rejection Moat Ledger -->
-        <div class="kanban-col">
-          <div class="kanban-col-header">
-            <span style="color:var(--text-muted)">✕ Rejection Moat</span>
-            <span class="kanban-count" id="countRejected">0</span>
-          </div>
-          <div class="kanban-cards-list" id="colRejected">
-            <!-- Cards injected dynamically -->
-          </div>
-        </div>
-
-      </div>
-    </div>
-
-
-    <!-- ====================================================================
-         TAB 05: LIVE API & MCP CONSOLE
-         ==================================================================== -->
-    <div class="tab-pane" id="tab-api">
-      <div class="panel-grid">
-        
-        <!-- Left: Playground Selector -->
-        <div class="card">
-          <div class="card-header">
-            <div class="card-title">
-              <span class="mono" style="color:var(--mandarin-orange)">05.</span> Agent Tool Invoker
-            </div>
-          </div>
-          <div class="card-body">
-            
-            <div class="form-group">
-              <label class="form-label">API Endpoint / MCP Tool</label>
-              <select class="form-select" id="apiToolSelect">
-                <option value="screen">POST /v1/screen (Inverse Search)</option>
-                <option value="ask">POST /v1/ask (Point Facts)</option>
-                <option value="grid">GET /v1/grid (Substation SCD)</option>
-                <option value="meta">GET /v1/meta/fields (Catalog)</option>
-                <option value="observe">POST /v1/workspace/observe</option>
-                <option value="state">GET /v1/workspace/{id}/state</option>
-              </select>
-            </div>
-
-            <div class="form-group">
-              <label class="form-label">Request Payload (JSON)</label>
-              <textarea class="form-input" id="apiPayloadEditor" rows="8" style="font-family:var(--font-mono); font-size:0.78rem">
-{
-  "min_acreage": 50.0,
-  "max_slope_pct": 5.0,
-  "flood_zones": ["X"],
-  "limit": 5
-}</textarea>
-            </div>
-
-            <button class="btn btn-accent btn-block" id="btnExecuteApiCall">
-              SEND REQUEST →
-            </button>
-
-          </div>
-        </div>
-
-        <!-- Right: Code Snippets & Response Viewer -->
-        <div style="display:flex; flex-direction:column; gap:1.25rem">
-          
-          <!-- Code Terminal View -->
-          <div class="code-terminal">
-            <div class="terminal-header">
-              <div style="display:flex; align-items:center; gap:0.5rem">
-                <div class="terminal-dots">
-                  <span class="terminal-dot"></span>
-                  <span class="terminal-dot"></span>
-                  <span class="terminal-dot"></span>
-                </div>
-                <span style="font-size:0.72rem; color:#A1A1AA">cURL / Python Client Code</span>
-              </div>
-              <button class="btn btn-secondary btn-sm" id="btnCopyCode" style="padding:0.15rem 0.5rem; font-size:0.65rem">Copy</button>
-            </div>
-            <div class="terminal-body">
-              <pre><code id="codeSnippetBox">// Generated code will appear here</code></pre>
-            </div>
-          </div>
-
-          <!-- Live Response Terminal -->
-          <div class="code-terminal">
-            <div class="terminal-header">
-              <span style="font-size:0.72rem; color:#A1A1AA">Live Server Response</span>
-              <span class="badge badge-green" id="apiStatusBadge">200 OK</span>
-            </div>
-            <div class="terminal-body">
-              <pre><code id="apiResponseBox">// Click "Send Request" to execute against the live platform API</code></pre>
-            </div>
-          </div>
-
-        </div>
-
-      </div>
-    </div>
-
+    </section>
   </main>
 
-  <!-- ====================================================================
-       OBSERVE SITE MODAL DIALOG
-       ==================================================================== -->
-  <div class="modal-backdrop" id="observeModal">
-    <div class="modal-card">
-      <div class="card-header">
-        <div class="card-title">
-          <span class="mono" style="color:var(--mandarin-orange)">+</span> Observe Siting Decision
-        </div>
-        <button class="btn btn-secondary btn-sm" id="btnCloseModal">✕</button>
-      </div>
-      <div class="card-body">
-        
-        <div class="form-group">
-          <label class="form-label">Parcel Identifier / Local Key</label>
-          <input type="text" class="form-input" id="modalLocalKey" value="PCL-TEXAS-00042">
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Decision Status</label>
-          <select class="form-select" id="modalStatusSelect">
-            <option value="shortlisted">shortlisted (High-Priority Siting Target)</option>
-            <option value="candidate">candidate (Under Active Review)</option>
-            <option value="rejected">rejected (Rejection Moat Ledger)</option>
-          </select>
-        </div>
-
-        <div class="form-group">
-          <label class="form-label">Audit Justification / Rationale</label>
-          <textarea class="form-input" id="modalJustification" rows="3" placeholder="Provide reason for this siting classification..."></textarea>
-        </div>
-
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:0.75rem; margin-bottom:1rem">
-          <div class="form-group" style="margin-bottom:0">
-            <label class="form-label">Latitude</label>
-            <input type="number" class="form-input" id="modalLat" value="32.8500" step="0.0001">
-          </div>
-          <div class="form-group" style="margin-bottom:0">
-            <label class="form-label">Longitude</label>
-            <input type="number" class="form-input" id="modalLng" value="-97.1000" step="0.0001">
-          </div>
-        </div>
-
-        <button class="btn btn-accent btn-block" id="btnSubmitObservation">
-          BIND OBSERVATION & SNAPSHOT →
-        </button>
-
-      </div>
-    </div>
-  </div>
-
-  <!-- Footer -->
-  <footer class="app-footer">
-    <div class="footer-inner">
-      <div>
-        <strong>MIREYE</strong> &copy; 2026. High-fidelity physical world context for AI agents.
-      </div>
-      <div>
-        Values: <span style="color:var(--text-primary)">Provenance &middot; Accuracy &middot; Reliability &middot; Integrity</span>
-      </div>
-    </div>
+  <footer class="product-footer">
+    <span>Observed facts stay separate from proposed designs.</span>
+    <span>PASS / FAIL / UNRESOLVED comes from deterministic evaluation.</span>
   </footer>
-
   <script src="/static/app.js"></script>
 </body>
 </html>

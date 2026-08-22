@@ -96,4 +96,19 @@ def test_branch_and_comparison_detect_geometry_metrics_and_constraints(tmp_path)
     assert comparison["object_changes"]["data_center_1"]["change"] == "modified"
     assert comparison["metric_changes"]
     assert comparison["constraint_changes"]["footprint_inside_parcel"]["after"]["outcome"] == "FAIL"
-    assert comparison["evaluation_versions"]["left"]["evaluator_version"] == "site_sandbox_geometry_v1"
+    assert comparison["evaluation_versions"]["left"]["evaluator_version"] == "site_sandbox_evidence_v1"
+
+
+def test_comparison_reflects_phase6_evidence_constraint_results(tmp_path):
+    _store, site, service = make_service(tmp_path)
+    site["evidence"].update({
+        "wetland_acres_on_parcel": {"value": 1.0, "status": "ok", "scope": "PARCEL", "expires_at": 9999999999.0},
+        "wetland_fraction_of_parcel": {"value": 0.1, "status": "ok", "scope": "PARCEL", "expires_at": 9999999999.0},
+    })
+    passing = service.create(site, workspace_id="ws-scenario", user_intent="Wetland pass", scene_state=scene(site), requested_constraints=[{"constraint_id": "max_nwi_wetland_fraction_of_parcel", "max_fraction": 0.2}])
+    failing = service.create(site, workspace_id="ws-scenario", user_intent="Wetland fail", scene_state=scene(site), requested_constraints=[{"constraint_id": "max_nwi_wetland_fraction_of_parcel", "max_fraction": 0.05}])
+
+    comparison = service.compare(passing["scenario_id"], failing["scenario_id"])
+
+    assert comparison["constraint_changes"]["max_nwi_wetland_fraction_of_parcel"]["before"]["outcome"] == "PASS"
+    assert comparison["constraint_changes"]["max_nwi_wetland_fraction_of_parcel"]["after"]["outcome"] == "FAIL"

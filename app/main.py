@@ -22,16 +22,20 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from app.discovery.confidence import rank_shortlist_by_confidence, score_site
+from app.config import WORLD_ASSET_DIR
+from app.diligence import DiligenceError, DiligenceService
 from app.discovery.screen import DiscoveryEngine, FilterRule
 from app.discovery.spatial import SpatialDiscovery
 from app.grid.ici import ICIEngine
 from app.mireye_client import MireyeClient
+from app.product import ProductExperienceService, ProductRequestError
 from app.sandbox_agent import ModelUnavailableError, SandboxAgent, ToolValidationError
 from app.sandbox_evaluator import SceneValidationError, evaluate_site
 from app.sandbox_scenarios import ScenarioError, ScenarioService
 from app.sandbox import ConfirmationRequired, MireyeUnavailableError, ParcelIdentityError, SandboxError, SiteSnapshotService
 from app.workspace.engine import WorkspaceEngine
 from app.workspace.store import WorkspaceStore
+from app.world import ArtifactStore, WorldError, WorldSnapshotService
 
 app = FastAPI(
     title="Mireye Agentic Siting & Spatial Intelligence Platform",
@@ -63,9 +67,12 @@ async def serve_sandbox(snapshot_id: str):
 mireye_client = MireyeClient()
 workspace_store = WorkspaceStore()
 workspace_engine = WorkspaceEngine(store=workspace_store, client=mireye_client)
-sandbox_service = SiteSnapshotService(store=workspace_store, client=mireye_client)
-scenario_service = ScenarioService(workspace_store)
-sandbox_agent = SandboxAgent(scenarios=scenario_service)
+world_service = WorldSnapshotService(workspace_store, ArtifactStore(WORLD_ASSET_DIR))
+scenario_service = ScenarioService(workspace_store, worlds=world_service)
+sandbox_service = SiteSnapshotService(store=workspace_store, client=mireye_client, scenarios=scenario_service)
+diligence_service = DiligenceService(workspace_store, sandbox_service, world_service)
+sandbox_agent = SandboxAgent(scenarios=scenario_service, intelligence=sandbox_service, diligence=diligence_service)
+product_service = ProductExperienceService(sandbox_service, world_service)
 spatial_discovery = SpatialDiscovery()
 ici_engine = ICIEngine()
 discovery_engine = DiscoveryEngine(client=mireye_client)
@@ -145,6 +152,12 @@ class SandboxChatRequest(BaseModel):
     session_id: str = Field(min_length=1, max_length=128)
     workspace_id: str | None = None
     scenario_id: str | None = None
+    world_snapshot_id: str | None = None
+    confirmed_refresh_plan_id: str | None = None
+
+
+class SandboxRefreshConfirmRequest(BaseModel):
+    confirmed: bool = False
 
 
 class SandboxScenarioCreateRequest(BaseModel):
@@ -153,6 +166,15 @@ class SandboxScenarioCreateRequest(BaseModel):
     scene_state: dict[str, Any] | None = None
     requested_constraints: list[dict[str, Any]] | None = None
     model_id: str | None = None
+    world_snapshot_id: str | None = None
+
+
+class WorldSnapshotCreateRequest(BaseModel):
+    site_snapshot_id: str
+    aoi_buffer_m: float = Field(default=1000, ge=100, le=5000)
+    requested_layers: list[Literal["terrain", "roads", "transmission"]] = Field(default_factory=lambda: ["terrain", "roads"])
+    prefer_1m: bool = True
+    overture_release: str = "2026-08-19.0"
 
 
 class SandboxScenarioBranchRequest(BaseModel):
@@ -167,9 +189,214 @@ class SandboxCompareRequest(BaseModel):
     right_revision: int | None = Field(default=None, ge=1)
 
 
+class ProductRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+
+
+class ProductSelectionRequest(BaseModel):
+    candidate_index: int = Field(ge=0)
+
+
+class ProductConfirmationRequest(BaseModel):
+    confirmed: bool = False
+
+
+class DiligenceProjectCreateRequest(BaseModel):
+    workspace_id: str = Field(min_length=1, max_length=128)
+    message: str = Field(min_length=1, max_length=4000)
+    candidates: list[Any] = Field(min_length=1, max_length=500)
+
+
+class DiligencePlanRequest(BaseModel):
+    confirmed_resolution: bool = False
+
+
+class DiligenceEnrichmentConfirmRequest(BaseModel):
+    spend_plan_id: str
+    confirmed: bool = False
+
+
+class DiligenceResolutionSelectionRequest(BaseModel):
+    option_index: int = Field(ge=0)
+
+
+class DiligenceWatchRequest(BaseModel):
+    enabled: bool = True
+
+
+class DiligenceCompareRequest(BaseModel):
+    candidate_ids: list[str] = Field(min_length=2, max_length=100)
+
+
+class DiligenceRefreshConfirmRequest(BaseModel):
+    spend_plan_id: str
+    confirmed: bool = False
+
+
+class DiligenceChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=4000)
+    session_id: str = Field(min_length=1, max_length=128)
+    confirmed_resolution_project_id: str | None = None
+    confirmed_enrichment_plan_id: str | None = None
+    confirmed_refresh_plan_id: str | None = None
+    confirmed_ask_candidate_id: str | None = None
+
+
 # -----------------------------------------------------------------------------
 # API Routes
 # -----------------------------------------------------------------------------
+@app.post("/v1/product/requests")
+async def start_product_request(req: ProductRequest):
+    try:
+        return await product_service.start(req.message)
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/product/requests/{request_id}/select")
+async def select_product_candidate(request_id: str, req: ProductSelectionRequest):
+    try:
+        return await product_service.select(request_id, req.candidate_index)
+    except ProductRequestError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/v1/product/requests/{request_id}/confirm")
+async def confirm_product_request(request_id: str, req: ProductConfirmationRequest):
+    try:
+        return await product_service.confirm(request_id, req.confirmed)
+    except ProductRequestError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (ConfirmationRequired, ParcelIdentityError) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (SandboxError, SceneValidationError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects")
+async def create_diligence_project(req: DiligenceProjectCreateRequest):
+    try:
+        return diligence_service.create_project(workspace_id=req.workspace_id, message=req.message, candidates=req.candidates)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}")
+async def get_diligence_project(project_id: str):
+    try:
+        return diligence_service.get(project_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/candidates")
+async def list_diligence_candidates(project_id: str, cursor: str | None = None, limit: int = Query(default=25, ge=1, le=100)):
+    try:
+        return diligence_service.candidate_page(project_id, cursor=cursor, limit=limit)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/plan")
+async def plan_diligence_project(project_id: str, req: DiligencePlanRequest):
+    try:
+        return await diligence_service.resolve_and_quote(project_id, confirmed_resolution=req.confirmed_resolution)
+    except ConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/enrich")
+async def enrich_diligence_project(project_id: str, req: DiligenceEnrichmentConfirmRequest):
+    try:
+        return await diligence_service.confirm_and_fetch(project_id, req.spend_plan_id, confirmed=req.confirmed)
+    except ConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/candidates/{candidate_id}/select")
+async def select_diligence_candidate_resolution(project_id: str, candidate_id: str, req: DiligenceResolutionSelectionRequest):
+    try:
+        return await diligence_service.select_resolution(project_id, candidate_id, req.option_index)
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/candidates/{candidate_id}/open")
+async def open_diligence_candidate(project_id: str, candidate_id: str):
+    try:
+        return diligence_service.open_candidate(project_id, candidate_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/watch")
+async def watch_diligence_project(project_id: str, req: DiligenceWatchRequest):
+    try:
+        return diligence_service.set_watch(project_id, enabled=req.enabled)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/compare")
+async def compare_diligence_candidates(project_id: str, req: DiligenceCompareRequest):
+    try:
+        return diligence_service.compare_candidates(project_id, req.candidate_ids)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/check-now")
+async def check_diligence_project(project_id: str):
+    try:
+        return diligence_service.check_now(project_id)
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/candidates/{candidate_id}/refresh/quote")
+async def quote_diligence_candidate_refresh(project_id: str, candidate_id: str):
+    try:
+        return await diligence_service.quote_candidate_refresh(project_id, candidate_id)
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/candidates/{candidate_id}/refresh")
+async def refresh_diligence_candidate(project_id: str, candidate_id: str, req: DiligenceRefreshConfirmRequest):
+    try:
+        return await diligence_service.confirm_candidate_refresh(project_id, candidate_id, req.spend_plan_id, confirmed=req.confirmed)
+    except ConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/chat")
+async def chat_diligence_project(project_id: str, req: DiligenceChatRequest):
+    try:
+        return await sandbox_agent.chat_project(
+            project_id, req.session_id, req.message,
+            confirmed_resolution_project_id=req.confirmed_resolution_project_id,
+            confirmed_enrichment_plan_id=req.confirmed_enrichment_plan_id,
+            confirmed_refresh_plan_id=req.confirmed_refresh_plan_id,
+            confirmed_ask_candidate_id=req.confirmed_ask_candidate_id,
+        )
+    except ModelUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (DiligenceError, ToolValidationError, ConfirmationRequired) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/health")
 async def health_check():
     return {
@@ -255,6 +482,38 @@ async def get_sandbox_snapshot(snapshot_id: str):
     return snapshot
 
 
+@app.get("/v1/sandbox/site/{snapshot_id}/freshness")
+async def get_sandbox_freshness(snapshot_id: str):
+    try:
+        return sandbox_service.freshness_status(snapshot_id)
+    except SandboxError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "SiteSnapshot not found." else 400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/site/{snapshot_id}/refresh/quote")
+async def quote_sandbox_refresh(snapshot_id: str):
+    try:
+        return await sandbox_service.quote_refresh(snapshot_id)
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "SiteSnapshot not found." else 400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/site/refresh/{spend_plan_id}/confirm")
+async def confirm_sandbox_refresh(spend_plan_id: str, req: SandboxRefreshConfirmRequest):
+    try:
+        return await sandbox_service.confirm_and_refresh(spend_plan_id, confirmed_by_application=req.confirmed)
+    except ConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ParcelIdentityError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "SiteSnapshot not found." else 400, detail=str(exc)) from exc
+
+
 @app.post("/v1/sandbox/site/{snapshot_id}/evaluate")
 async def evaluate_sandbox_site(snapshot_id: str, req: SandboxEvaluationRequest):
     snapshot = sandbox_service.get_snapshot(snapshot_id)
@@ -272,7 +531,11 @@ async def chat_with_sandbox(snapshot_id: str, req: SandboxChatRequest):
     if snapshot is None:
         raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
     try:
-        return await sandbox_agent.chat(snapshot, req.session_id, req.message, workspace_id=req.workspace_id, scenario_id=req.scenario_id)
+        return await sandbox_agent.chat(
+            snapshot, req.session_id, req.message, workspace_id=req.workspace_id,
+            scenario_id=req.scenario_id, world_snapshot_id=req.world_snapshot_id,
+            confirmed_refresh_plan_id=req.confirmed_refresh_plan_id,
+        )
     except ModelUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except ToolValidationError as exc:
@@ -288,12 +551,58 @@ async def create_sandbox_scenario(snapshot_id: str, req: SandboxScenarioCreateRe
         raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
     try:
         scene_state = req.scene_state or sandbox_service.scene_state(snapshot_id)
+        if req.world_snapshot_id is not None:
+            scene_state = dict(scene_state)
+            scene_state["world_snapshot_id"] = req.world_snapshot_id
         return scenario_service.create(
             snapshot, workspace_id=req.workspace_id, user_intent=req.user_intent,
             scene_state=scene_state, requested_constraints=req.requested_constraints, model_id=req.model_id,
         )
     except ScenarioError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/world-snapshots")
+async def create_world_snapshot(req: WorldSnapshotCreateRequest):
+    try:
+        snapshot = await world_service.create(
+            site_snapshot_id=req.site_snapshot_id, buffer_m=req.aoi_buffer_m,
+            requested_layers=req.requested_layers,
+            options={"prefer_1m": req.prefer_1m, "overture_release": req.overture_release},
+        )
+        return world_service.public(snapshot)
+    except WorldError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "SiteSnapshot not found." else 400, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/world-snapshots/{world_snapshot_id}")
+async def get_world_snapshot(world_snapshot_id: str):
+    snapshot = world_service.get(world_snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="WorldSnapshot not found.")
+    return world_service.public(snapshot)
+
+
+@app.get("/v1/sandbox/world-snapshots/{world_snapshot_id}/terrain/{z}/{x}/{y}")
+async def get_world_terrain_tile(world_snapshot_id: str, z: int, x: int, y: int):
+    snapshot = world_service.get(world_snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="WorldSnapshot not found.")
+    try:
+        return FileResponse(world_service.artifact_for_tile(snapshot, z, x, y), media_type="image/png")
+    except WorldError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/world-snapshots/{world_snapshot_id}/roads")
+async def get_world_roads(world_snapshot_id: str):
+    snapshot = world_service.get(world_snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="WorldSnapshot not found.")
+    try:
+        return FileResponse(world_service.road_artifact(snapshot), media_type="application/geo+json")
+    except WorldError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.post("/v1/sandbox/scenarios/{scenario_id}/branch")

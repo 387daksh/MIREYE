@@ -35,15 +35,21 @@ The URL has this form:
 http://127.0.0.1:8000/sandbox/{snapshot_id}?scenario={scenario_id}
 ```
 
+The plain-English product home is available on the same server at:
+
+```text
+http://127.0.0.1:8000/
+```
+
 ## Demo Flow
 
-1. Open the printed URL. Confirm the real parcel boundary and resolution point are visible and the camera fits the parcel.
-2. Confirm the orange conceptual 100 MW data center appears inside the observed parcel.
-3. Review REAL PARCEL, CURRENT SCENARIO, and the OBSERVED / DERIVED / PROPOSED legend.
+1. Open the printed URL. Confirm the real parcel boundary, terrain, roads, and resolution point are visible and the camera fits the parcel.
+2. Confirm the orange conceptual 100 MW data center is visually distinct from observed geometry.
+3. Review Site intelligence, MIREYE site intelligence, Proposed design, and the Observed / Derived / Proposed legend.
 4. Click an example prompt to place it in the chat input, then send it.
 5. Try `Move it 200 meters north.`, `Make it 120 m by 140 m.`, `Rotate it 30 degrees.`, and `Does it fit?`.
-6. Confirm every evaluation shows PASS, FAIL, or UNRESOLVED with the deterministic reason and evidence IDs.
-7. Use Branch to create another scenario, change its capacity or geometry, select both scenarios, and use Compare.
+6. Confirm every evaluation shows PASS, FAIL, or UNRESOLVED with a deterministic reason. Use View sources for factual provenance and freshness.
+7. Use Try another to create another option, change its capacity or geometry, select both options, and use Compare options.
 8. Confirm the parcel geometry never changes while the orange proposed object does.
 
 Live chat requires `OPENAI_API_KEY`. Without it, snapshot, scene, evaluator, proposal, scenario persistence, branching, comparison, and scripted agent tools remain testable; the chat endpoint reports model unavailability explicitly.

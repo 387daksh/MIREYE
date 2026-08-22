@@ -1,6 +1,7 @@
 """Durable, complete-state Site Sandbox scenario revisions and comparison."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import time
@@ -45,8 +46,20 @@ def _empty_evaluation(snapshot_id: str) -> dict:
 
 
 class ScenarioService:
-    def __init__(self, store: WorkspaceStore):
+    def __init__(self, store: WorkspaceStore, worlds: Any | None = None):
         self.store = store
+        self.worlds = worlds
+
+    def _prepare_scene(self, snapshot: dict, scene_state: dict) -> dict:
+        world_snapshot_id = scene_state.get("world_snapshot_id")
+        if world_snapshot_id is None:
+            return copy.deepcopy(scene_state)
+        if self.worlds is None:
+            raise ScenarioError("WorldSnapshot support is unavailable.")
+        try:
+            return self.worlds.anchor_scene(scene_state, world_snapshot_id)
+        except ValueError as exc:
+            raise ScenarioError(str(exc)) from exc
 
     def evaluate(self, snapshot: dict, scene_state: dict, requested_constraints: list[dict] | None) -> tuple[list[dict], dict]:
         constraints = requested_constraints or list(DEFAULT_SCENARIO_CONSTRAINTS)
@@ -74,6 +87,7 @@ class ScenarioService:
             raise ScenarioError("Scenario workspace_id must match the immutable SiteSnapshot workspace_id.")
         if self.store.get_site_snapshot(snapshot["snapshot_id"]) is None:
             raise ScenarioError("SiteSnapshot must be persisted before creating a scenario.")
+        scene_state = self._prepare_scene(snapshot, scene_state)
         constraints, evaluation = self.evaluate(snapshot, scene_state, requested_constraints)
         return self._write(
             scenario_id=scenario_id or f"scn_{uuid.uuid4().hex}", workspace_id=workspace_id,
@@ -97,6 +111,9 @@ class ScenarioService:
         head = self.get(scenario_id)
         if head["site_snapshot_id"] != snapshot["snapshot_id"]:
             raise ScenarioError("Scenario does not reference this SiteSnapshot.")
+        if scene_state.get("world_snapshot_id") != head.get("world_snapshot_id"):
+            raise ScenarioError("Scenario revisions must retain the same WorldSnapshot; create a new scenario for another world state.")
+        scene_state = self._prepare_scene(snapshot, scene_state)
         constraints, calculated = self.evaluate(snapshot, scene_state, requested_constraints or head["requested_constraints"])
         return self._write(
             scenario_id=scenario_id, workspace_id=head["workspace_id"], revision=head["revision"] + 1,
@@ -130,6 +147,91 @@ class ScenarioService:
             raise ScenarioError("Scenario was not found.")
         return revisions
 
+    def revalidate_after_refresh(self, previous_snapshot: dict, refreshed_snapshot: dict, snapshot_diff: dict) -> list[dict]:
+        """Append refresh assessments without changing durable scenario design revisions."""
+        site_id = refreshed_snapshot.get("site_id")
+        if not site_id:
+            raise ScenarioError("Refreshed SiteSnapshot is not linked to a stable Site.")
+        dependencies = self.store.affected_scenario_constraints(site_id, snapshot_diff["changed_evidence_ids"])
+        grouped: dict[tuple[str, int], set[str]] = {}
+        for dependency in dependencies:
+            grouped.setdefault((dependency["scenario_id"], dependency["revision"]), set()).add(dependency["constraint_id"])
+
+        runs = []
+        for (scenario_id, revision), constraint_ids in grouped.items():
+            scenario = self.get(scenario_id, revision)
+            requested = [
+                spec for spec in scenario["requested_constraints"]
+                if spec.get("constraint_id") in constraint_ids
+            ]
+            if not requested:
+                continue
+            scene_state = copy.deepcopy(scenario["scene_state"])
+            scene_state["site_snapshot_id"] = refreshed_snapshot["snapshot_id"]
+            if "frame" in scene_state:
+                scene_state["frame"]["origin"] = copy.deepcopy(refreshed_snapshot["parcel_identity"]["selected_point"])
+            try:
+                affected_evaluation = evaluate_site(refreshed_snapshot, scene_state, requested)
+            except SceneValidationError as exc:
+                raise ScenarioError(str(exc)) from exc
+            merged = self._merge_refresh_evaluation(
+                scenario["evaluation"], affected_evaluation, refreshed_snapshot["snapshot_id"], constraint_ids
+            )
+            status = self._refresh_status(
+                scenario["evaluation"], merged, constraint_ids, geometry_changed=snapshot_diff["geometry_changed"]
+            )
+            run = {
+                "evaluation_run_id": f"eval_{uuid.uuid4().hex}",
+                "scenario_id": scenario_id,
+                "revision": revision,
+                "site_id": site_id,
+                "source_snapshot_id": previous_snapshot["snapshot_id"],
+                "evaluated_snapshot_id": refreshed_snapshot["snapshot_id"],
+                "status": status,
+                "affected_constraint_ids": sorted(constraint_ids),
+                "snapshot_diff": snapshot_diff,
+                "evaluation": merged,
+                "created_at": time.time(),
+            }
+            self.store.create_scenario_evaluation_run(run)
+            runs.append(run)
+        return runs
+
+    @staticmethod
+    def _merge_refresh_evaluation(original: dict, affected: dict, snapshot_id: str, constraint_ids: set[str]) -> dict:
+        affected_by_id = {item["constraint_id"]: item for item in affected["constraint_results"]}
+        results = [
+            affected_by_id.get(item["constraint_id"], item)
+            for item in original.get("constraint_results", [])
+        ]
+        outcomes = {item["outcome"] for item in results}
+        return {
+            **original,
+            "site_snapshot_id": snapshot_id,
+            "overall_status": "FAIL" if "FAIL" in outcomes else "UNRESOLVED" if "UNRESOLVED" in outcomes else "PASS",
+            "constraint_results": results,
+            "derived_geometry_metrics": (
+                affected["derived_geometry_metrics"] if any(item["constraint_id"] in constraint_ids for item in results) else original.get("derived_geometry_metrics", {})
+            ),
+            "revalidation": {
+                "source_snapshot_id": original.get("site_snapshot_id"),
+                "evaluated_snapshot_id": snapshot_id,
+                "affected_constraint_ids": sorted(constraint_ids),
+            },
+        }
+
+    @staticmethod
+    def _refresh_status(original: dict, refreshed: dict, constraint_ids: set[str], *, geometry_changed: bool) -> str:
+        if geometry_changed:
+            return "NEEDS_GEOMETRY_REBASE"
+        before = {item["constraint_id"]: item["outcome"] for item in original.get("constraint_results", [])}
+        after = {item["constraint_id"]: item["outcome"] for item in refreshed.get("constraint_results", [])}
+        if any(before.get(constraint_id) == "PASS" and after.get(constraint_id) == "FAIL" for constraint_id in constraint_ids):
+            return "INVALIDATED_BY_REFRESH"
+        if any(after.get(constraint_id) == "UNRESOLVED" for constraint_id in constraint_ids):
+            return "UNRESOLVED"
+        return "CURRENT"
+
     def record_accepted_tool(
         self,
         snapshot: dict,
@@ -160,6 +262,8 @@ class ScenarioService:
         left, right = self.get(left_scenario_id, left_revision), self.get(right_scenario_id, right_revision)
         if left["site_snapshot_id"] != right["site_snapshot_id"]:
             raise ScenarioError("Scenarios must reference the same SiteSnapshot to compare them.")
+        if left.get("world_snapshot_id") != right.get("world_snapshot_id"):
+            raise ScenarioError("Scenarios reference different WorldSnapshots and cannot be compared as equivalent physical worlds.")
         object_changes = self._object_changes(left["scene_state"], right["scene_state"])
         metric_changes = self._changes(left["evaluation"].get("derived_geometry_metrics", {}), right["evaluation"].get("derived_geometry_metrics", {}))
         constraint_changes = self._constraint_changes(left["evaluation"], right["evaluation"])
@@ -198,12 +302,13 @@ class ScenarioService:
             "created_at": time.time(),
         }
         record["state_hash"] = hashlib.sha256(_canonical({
-            "site_snapshot_id": record["snapshot"]["snapshot_id"], "scene_state": record["scene_state"],
+            "site_snapshot_id": record["snapshot"]["snapshot_id"], "world_snapshot_id": record["scene_state"].get("world_snapshot_id"), "scene_state": record["scene_state"],
             "requested_constraints": record["requested_constraints"], "evaluation": record["evaluation"],
             "geometry_engine_version": record["geometry_engine_version"],
             "proposal_strategy_version": record["proposal_strategy_version"], "model_id": record["model_id"],
             "tool_schema_version": record["tool_schema_version"], "accepted_tool_calls": record["accepted_tool_calls"],
         }).encode("utf-8")).hexdigest()
+        record["world_snapshot_id"] = record["scene_state"].get("world_snapshot_id")
         record["site_snapshot_id"] = record.pop("snapshot")["snapshot_id"]
         self.store.create_scenario_version(record)
         return record

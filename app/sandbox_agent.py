@@ -3,19 +3,22 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 import httpx
 
-from app.config import OPENAI_API_KEY, SANDBOX_AGENT_MODEL
-from app.sandbox import scene_state_from_snapshot
+from app.config import OPENAI_API_KEY, SANDBOX_AGENT_MODEL, SANDBOX_AGENT_REASONING_EFFORT
+from app.sandbox import ConfirmationRequired, SiteSnapshotService, scene_state_from_snapshot
 from app.sandbox_evaluator import SceneValidationError, build_oriented_footprint, evaluate_site
 from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_data_center_proposal
 from app.sandbox_scenarios import ScenarioError, ScenarioService
 
 
-SYSTEM_INSTRUCTIONS = """You are the MIREYE Site Sandbox assistant. MIREYE/source evidence is authoritative for factual site data. OBSERVED data is factual, DERIVED data is deterministic, and PROPOSED objects are simulations. Begin every request with get_site_context using the provided snapshot ID. Use tools for all factual claims, proposal changes, and evaluations. PASS, FAIL, and UNRESOLVED only come from evaluate_scenario; never calculate or decide them yourself. For an unqualified fit request, evaluate footprint_inside_parcel, footprint_area, and parcel_coverage only. Do not request minimum_setback without a numeric minimum_m. Never invent values, parcel facts, geometry, or engineering conclusions. Do not claim engineering-grade analysis. If evidence cannot prove a request, state UNRESOLVED. Never call or suggest external data fetching."""
+SYSTEM_INSTRUCTIONS = """You are the MIREYE Site Sandbox assistant. MIREYE/source evidence is authoritative for factual site data. OBSERVED data is factual, DERIVED data is deterministic, and PROPOSED objects are simulations. Begin every request with get_site_context using the provided snapshot ID. Use tools for all factual claims, proposal changes, and evaluations. PASS, FAIL, and UNRESOLVED only come from evaluate_scenario; never calculate or decide them yourself. Point-scoped flood, slope, and proximity results must never be described as parcel-wide or capacity/access proof. For an unqualified fit request, evaluate footprint_inside_parcel, footprint_area, and parcel_coverage only. Do not request minimum_setback without a numeric minimum_m. When the user asks for a second, alternative, or another layout and an active scenario exists, call branch_scenario, make a validated geometry change with transform_object or optimize_layout, and evaluate it; never remove or overwrite the existing layout, and never describe an identical branch as an alternative. Never invent values, parcel facts, geometry, or engineering conclusions. Do not claim engineering-grade analysis. If evidence cannot prove a request, state UNRESOLVED. You may inspect MIREYE freshness and request a quote. A MIREYE refresh can run only after the application has supplied explicit confirmation; you cannot create confirmation yourself. In the final user-facing response, use plain site-planning language and do not mention tool names, internal object IDs, evidence IDs, snapshot IDs, schema versions, or API implementation details."""
+
+DILIGENCE_SYSTEM_INSTRUCTIONS = """You are the single MIREYE site-diligence orchestrator. Work only with candidates supplied in the current project; statewide inverse parcel discovery is unavailable and the synthetic screen endpoint is prohibited. Begin by reading the compiled project request and discovery capabilities. Use typed tools for candidate resolution, MIREYE field planning, quoting, enrichment, evaluation, ranking, evidence, and freshness. You cannot create confirmation: candidate resolution, enrichment, refresh, and MIREYE site questions run only when the application supplies the matching confirmation identifier. Never invent candidate facts, numerical scores, geometry, grid capacity, legal access, parcel-wide slope, parcel-wide flood safety, or zoning meaning. Deterministic tools alone produce PASS, FAIL, and UNRESOLVED. Explain rankings only from returned outcomes and evidence. Once a candidate is selected, hand it to the existing site sandbox rather than duplicating site data."""
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -24,13 +27,16 @@ def _tool(name: str, description: str, properties: dict, required: list[str]) ->
 
 NUMBER = {"type": ["number", "null"]}
 STRING = {"type": ["string", "null"]}
+STRING_LIST = {"type": ["array", "null"], "items": {"type": "string"}}
+BOOLEAN = {"type": ["boolean", "null"]}
 CONSTRAINT_SPEC = {
     "type": "object",
     "properties": {
-        "constraint_id": {"type": "string", "enum": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_slope_degrees", "industrial_zoning"]},
+        "constraint_id": {"type": "string", "enum": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in", "parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "sufficient_grid_capacity"]},
         "object_id": STRING, "minimum_m": NUMBER, "min_m2": NUMBER, "max_m2": NUMBER, "max_percent": NUMBER, "max_degrees": NUMBER,
+        "max_acres": NUMBER, "max_fraction": NUMBER, "max_distance_m": NUMBER, "allowed_codes": STRING_LIST, "required_statuses": STRING_LIST, "require_operational": BOOLEAN,
     },
-    "required": ["constraint_id", "object_id", "minimum_m", "min_m2", "max_m2", "max_percent", "max_degrees"],
+    "required": ["constraint_id", "object_id", "minimum_m", "min_m2", "max_m2", "max_percent", "max_degrees", "max_acres", "max_fraction", "max_distance_m", "allowed_codes", "required_statuses", "require_operational"],
     "additionalProperties": False,
 }
 TOOL_DEFINITIONS = [
@@ -46,8 +52,34 @@ TOOL_DEFINITIONS = [
     }, ["object_id", "operation", "delta_x_m", "delta_y_m", "width_m", "length_m", "height_m", "rotation_deg", "capacity_mw"]),
     _tool("evaluate_scenario", "Run the deterministic evaluator. Use only supported constraint IDs and report its output exactly.", {"requested_constraints": {"type": "array", "items": CONSTRAINT_SPEC}}, ["requested_constraints"]),
     _tool("get_evidence", "Read stored factual evidence only; this never fetches new data.", {"evidence_ids": {"type": "array", "items": {"type": "string"}}, "constraint_id": STRING}, ["evidence_ids", "constraint_id"]),
+    _tool("check_evidence_freshness", "Check stored MIREYE evidence freshness. This never fetches or spends credits.", {"snapshot_id": {"type": "string"}}, ["snapshot_id"]),
+    _tool("quote_mireye_refresh", "Create a MIREYE refresh spend plan for stale fields. This quotes but does not fetch or spend credits.", {"snapshot_id": {"type": "string"}}, ["snapshot_id"]),
+    _tool("confirm_and_refresh_evidence", "Refresh only a previously quoted spend plan. It succeeds only when the application has separately confirmed that plan.", {"spend_plan_id": {"type": "string"}}, ["spend_plan_id"]),
+    _tool("build_world_snapshot", "Build or reuse real terrain and road layers for this immutable SiteSnapshot.", {"snapshot_id": {"type": "string"}}, ["snapshot_id"]),
+    _tool("optimize_layout", "Deterministically reposition the existing rectangular proposal within a requested parcel setback.", {"object_id": {"type": "string"}, "minimum_setback_m": {"type": "number"}}, ["object_id", "minimum_setback_m"]),
+    _tool("branch_scenario", "Create a persisted scenario branch from the active scenario.", {"scenario_id": {"type": "string"}, "user_intent": {"type": "string"}}, ["scenario_id", "user_intent"]),
+    _tool("compare_scenarios", "Run deterministic comparison for two persisted scenarios.", {"left_scenario_id": {"type": "string"}, "right_scenario_id": {"type": "string"}}, ["left_scenario_id", "right_scenario_id"]),
     _tool("remove_object", "Remove one proposed object from this in-memory session.", {"object_id": {"type": "string"}}, ["object_id"]),
     _tool("reset_proposals", "Remove all proposed objects from this in-memory session.", {"snapshot_id": {"type": "string"}}, ["snapshot_id"]),
+]
+
+DILIGENCE_TOOL_DEFINITIONS = [
+    _tool("compile_project_request", "Read the persisted typed project requirement and its supported/unresolved semantics.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("get_discovery_capabilities", "Report the real candidate-provider boundary. Statewide inverse search is unavailable.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("enumerate_supplied_candidates", "Page through only the customer-supplied candidate list.", {"project_id": {"type": "string"}, "cursor": STRING, "limit": {"type": "integer", "minimum": 1, "maximum": 100}}, ["project_id", "cursor", "limit"]),
+    _tool("resolve_candidate", "Resolve one supplied candidate with MIREYE. Application confirmation is required.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}}, ["project_id", "candidate_id"]),
+    _tool("plan_mireye_fields", "Compute the minimum catalog field selection required by the typed constraints.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("quote_mireye_enrichment", "Resolve remaining supplied candidates and quote the exact shared field selection without fetching.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("confirm_and_fetch_enrichment", "Execute only a previously quoted enrichment plan confirmed by the application.", {"project_id": {"type": "string"}, "spend_plan_id": {"type": "string"}}, ["project_id", "spend_plan_id"]),
+    _tool("evaluate_candidates", "Return deterministic candidate evaluations created from immutable SiteSnapshots.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("rank_candidates", "Order candidates deterministically by failure, uncertainty, and pass counts; never invent a suitability score.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("compare_candidates", "Compare deterministic outcomes, values, units, and evidence IDs for selected candidates.", {"project_id": {"type": "string"}, "candidate_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2}}, ["project_id", "candidate_ids"]),
+    _tool("check_evidence_freshness", "Check field-level freshness for enriched project candidates without fetching.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("quote_mireye_refresh", "Quote the minimum stale fields for one enriched candidate without fetching.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}}, ["project_id", "candidate_id"]),
+    _tool("confirm_and_refresh_evidence", "Execute a candidate refresh only for an application-confirmed spend plan.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}, "spend_plan_id": {"type": "string"}}, ["project_id", "candidate_id", "spend_plan_id"]),
+    _tool("get_evidence", "Read persisted MIREYE evidence for an enriched candidate.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}, "evidence_ids": {"type": ["array", "null"], "items": {"type": "string"}}}, ["project_id", "candidate_id", "evidence_ids"]),
+    _tool("ask_mireye_site", "Ask the documented MIREYE coordinate Q&A endpoint only after application confirmation.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}, "question": {"type": "string"}}, ["project_id", "candidate_id", "question"]),
+    _tool("build_world_snapshot", "Build or reuse the candidate's real terrain and road WorldSnapshot.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}}, ["project_id", "candidate_id"]),
 ]
 
 
@@ -73,13 +105,16 @@ class AgentModel(Protocol):
 class OpenAIResponsesModel:
     """Minimal direct Responses API adapter; the sandbox remains tool-authoritative."""
 
-    def __init__(self, api_key: str = OPENAI_API_KEY, model: str = SANDBOX_AGENT_MODEL):
-        self.api_key, self.model = api_key, model
+    def __init__(self, api_key: str = OPENAI_API_KEY, model: str = SANDBOX_AGENT_MODEL, reasoning_effort: str = SANDBOX_AGENT_REASONING_EFFORT):
+        self.api_key, self.model, self.reasoning_effort = api_key, model, reasoning_effort
 
     async def respond(self, input_items: list[dict], tools: list[dict]) -> ModelReply:
+        return await self.respond_with_instructions(input_items, tools, SYSTEM_INSTRUCTIONS)
+
+    async def respond_with_instructions(self, input_items: list[dict], tools: list[dict], instructions: str) -> ModelReply:
         if not self.api_key:
             raise ModelUnavailableError("Sandbox chat requires OPENAI_API_KEY configuration.")
-        payload = {"model": self.model, "instructions": SYSTEM_INSTRUCTIONS, "input": input_items, "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False, "store": False}
+        payload = {"model": self.model, "reasoning": {"effort": self.reasoning_effort}, "instructions": instructions, "input": input_items, "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False, "store": False}
         async with httpx.AsyncClient(timeout=45) as client:
             try:
                 response = await client.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {self.api_key}"}, json=payload)
@@ -107,6 +142,7 @@ class SandboxSession:
     active_scenario_id: str | None = None
     workspace_id: str | None = None
     requested_constraints: list[dict] = field(default_factory=list)
+    scenario_ids: list[str] = field(default_factory=list)
 
 
 class InMemorySandboxSessions:
@@ -136,6 +172,7 @@ class SandboxToolExecutor:
             "propose_data_center": self._propose_data_center,
             "transform_object": self._transform_object,
             "evaluate_scenario": self._evaluate_scenario,
+            "optimize_layout": self._optimize_layout,
             "get_evidence": self._get_evidence,
             "remove_object": self._remove_object,
             "reset_proposals": self._reset_proposals,
@@ -182,9 +219,9 @@ class SandboxToolExecutor:
         return {
             "parcel_identity": copy.deepcopy(self.snapshot["parcel_identity"]),
             "observed_geometry": {"type": self.snapshot["geometry"].get("type"), "source": self.snapshot["parcel_identity"].get("parcel_data_source"), "origin": "OBSERVED"},
-            "evidence_summary": {key: {"status": value.get("status"), "source": value.get("source"), "expires_at": value.get("expires_at")} for key, value in self.snapshot.get("evidence", {}).items()},
-            "available_constraints": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision"],
-            "unresolved_constraints": ["max_slope_degrees", "industrial_zoning"],
+            "evidence_summary": {key: {"status": value.get("status"), "scope": value.get("scope"), "source": value.get("source"), "expires_at": value.get("expires_at")} for key, value in self.snapshot.get("evidence", {}).items()},
+            "available_constraints": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in"],
+            "unresolved_constraints": ["parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "sufficient_grid_capacity"],
             "scene_state": copy.deepcopy(self.session.scene_state),
         }
 
@@ -262,6 +299,26 @@ class SandboxToolExecutor:
         evidence = self.snapshot.get("evidence", {})
         return {"constraint_id": arguments["constraint_id"], "evidence": {item: copy.deepcopy(evidence[item]) for item in arguments["evidence_ids"] if item in evidence}}
 
+    def _optimize_layout(self, arguments: dict) -> dict:
+        self._only(arguments, {"object_id", "minimum_setback_m"}, {"object_id", "minimum_setback_m"})
+        current = self._find_object(arguments["object_id"], self.session.scene_state)
+        geometry = current["geometry_local"]
+        try:
+            proposal = generate_data_center_proposal(
+                self.snapshot, self.session.scene_state,
+                capacity_mw=current["attributes"]["capacity_mw"],
+                width_m=geometry["width_m"], length_m=geometry["length_m"], height_m=geometry["height_m"],
+                position=None, rotation_deg=None, minimum_setback_m=arguments["minimum_setback_m"],
+            )
+        except SceneValidationError as exc:
+            raise ToolValidationError(str(exc)) from exc
+        if proposal["status"] in {"PLACED", "ADJUSTED"}:
+            self._commit(proposal.pop("scene_state"))
+            self.session.last_evaluation = proposal["evaluation"]
+        proposal["scene_state"] = copy.deepcopy(self.session.scene_state)
+        proposal["scene_version"] = self.session.scene_state["scene_version"]
+        return proposal
+
     def _remove_object(self, arguments: dict) -> dict:
         self._only(arguments, {"object_id"}, {"object_id"})
         scene = copy.deepcopy(self.session.scene_state)
@@ -281,12 +338,31 @@ class SandboxToolExecutor:
 
 
 class SandboxAgent:
-    def __init__(self, model: AgentModel | None = None, sessions: InMemorySandboxSessions | None = None, scenarios: ScenarioService | None = None):
+    def __init__(
+        self,
+        model: AgentModel | None = None,
+        sessions: InMemorySandboxSessions | None = None,
+        scenarios: ScenarioService | None = None,
+        intelligence: SiteSnapshotService | None = None,
+        diligence: Any | None = None,
+    ):
         self.model = model or OpenAIResponsesModel()
         self.sessions = sessions or InMemorySandboxSessions()
         self.scenarios = scenarios
+        self.intelligence = intelligence
+        self.diligence = diligence
 
-    async def chat(self, snapshot: dict, session_id: str, message: str, *, workspace_id: str | None = None, scenario_id: str | None = None) -> dict:
+    async def chat(
+        self,
+        snapshot: dict,
+        session_id: str,
+        message: str,
+        *,
+        workspace_id: str | None = None,
+        scenario_id: str | None = None,
+        world_snapshot_id: str | None = None,
+        confirmed_refresh_plan_id: str | None = None,
+    ) -> dict:
         if not isinstance(message, str) or not message.strip():
             raise ToolValidationError("message must not be empty.")
         session = self.sessions.get(snapshot, session_id)
@@ -301,16 +377,43 @@ class SandboxAgent:
             session.requested_constraints = copy.deepcopy(scenario["requested_constraints"])
             session.active_scenario_id = scenario_id
             session.workspace_id = scenario["workspace_id"]
+            if scenario_id not in session.scenario_ids:
+                session.scenario_ids.append(scenario_id)
+        if world_snapshot_id is not None:
+            if self.scenarios is None or self.scenarios.worlds is None:
+                raise ToolValidationError("WorldSnapshot support is unavailable.")
+            current_world_id = session.scene_state.get("world_snapshot_id")
+            if current_world_id is not None and current_world_id != world_snapshot_id:
+                raise ToolValidationError("Chat session cannot switch WorldSnapshots.")
+            try:
+                session.scene_state = self.scenarios.worlds.anchor_scene(session.scene_state, world_snapshot_id)
+            except ValueError as exc:
+                raise ToolValidationError(str(exc)) from exc
         if workspace_id is not None:
             if workspace_id != snapshot.get("workspace_id"):
                 raise ToolValidationError("workspace_id must match the SiteSnapshot workspace_id.")
             session.workspace_id = workspace_id
         executor = SandboxToolExecutor(snapshot, session)
-        input_items = [{"role": "user", "content": f"[Sandbox snapshot_id: {snapshot['snapshot_id']}]\n{message.strip()}"}]
+        alternative_requested = bool(re.search(r"\b(second|alternative|another)\s+(?:layout|option|scenario)\b", message, re.IGNORECASE))
+        initial_proposals = json.dumps(session.scene_state.get("proposed", []), sort_keys=True, separators=(",", ":"))
+        alternative_guard_attempts = 0
+        scenario_context = f"\n[Active scenario_id: {session.active_scenario_id}; available scenario_ids: {', '.join(session.scenario_ids)}]" if session.active_scenario_id else ""
+        input_items = [{"role": "user", "content": f"[Sandbox snapshot_id: {snapshot['snapshot_id']}]{scenario_context}\n{message.strip()}"}]
         trace, final_message = [], ""
-        for _ in range(8):
+        for _ in range(10):
             reply = await self.model.respond(input_items, TOOL_DEFINITIONS)
             if not reply.tool_calls:
+                tools_used = {item["tool"] for item in trace if item["status"] == "ok"}
+                proposals_changed = json.dumps(session.scene_state.get("proposed", []), sort_keys=True, separators=(",", ":")) != initial_proposals
+                alternative_complete = proposals_changed and "evaluate_scenario" in tools_used
+                if alternative_requested and not alternative_complete and alternative_guard_attempts < 2:
+                    missing = "a validated geometry change" if not proposals_changed else "deterministic evaluation"
+                    input_items.append({"role": "user", "content": f"[Deterministic guard: the alternative is incomplete; {missing} is still required. Continue with the validated tools and do not narrate completion yet.]"})
+                    alternative_guard_attempts += 1
+                    continue
+                if alternative_requested and not alternative_complete:
+                    final_message = "No validated alternative layout was produced; the existing layout remains unchanged."
+                    break
                 final_message = reply.message or "No deterministic sandbox action was taken."
                 break
             input_items.extend(reply.response_items)
@@ -319,8 +422,23 @@ class SandboxAgent:
                 previous_session = copy.deepcopy(session)
                 try:
                     arguments = json.loads(call["arguments"]) if isinstance(call.get("arguments"), str) else call.get("arguments")
-                    result = executor.execute(call.get("name"), arguments)
-                    if self.scenarios and call.get("name") in {"propose_data_center", "transform_object", "remove_object", "reset_proposals", "evaluate_scenario"}:
+                    if call.get("name") in {"check_evidence_freshness", "quote_mireye_refresh", "confirm_and_refresh_evidence", "build_world_snapshot", "branch_scenario", "compare_scenarios"}:
+                        result = await self._execute_intelligence_tool(
+                            snapshot, call.get("name"), arguments,
+                            confirmed_refresh_plan_id=confirmed_refresh_plan_id,
+                        )
+                        if call.get("name") == "branch_scenario":
+                            session.active_scenario_id = result["scenario_id"]
+                            session.workspace_id = result["workspace_id"]
+                            session.scene_state = copy.deepcopy(result["scene_state"])
+                            session.last_evaluation = copy.deepcopy(result["evaluation"])
+                            session.requested_constraints = copy.deepcopy(result["requested_constraints"])
+                            for known_id in (arguments["scenario_id"], result["scenario_id"]):
+                                if known_id not in session.scenario_ids:
+                                    session.scenario_ids.append(known_id)
+                    else:
+                        result = executor.execute(call.get("name"), arguments)
+                    if self.scenarios and call.get("name") in {"propose_data_center", "transform_object", "optimize_layout", "remove_object", "reset_proposals", "evaluate_scenario"}:
                         if call.get("name") == "propose_data_center" and result.get("status") not in {"PLACED", "ADJUSTED"}:
                             pass
                         else:
@@ -337,7 +455,10 @@ class SandboxAgent:
                                 evaluation=result if call.get("name") == "evaluate_scenario" else None,
                             )
                             session.active_scenario_id = scenario["scenario_id"]
+                            if scenario["scenario_id"] not in session.scenario_ids:
+                                session.scenario_ids.append(scenario["scenario_id"])
                             session.workspace_id = scenario["workspace_id"]
+                            session.scene_state = copy.deepcopy(scenario["scene_state"])
                             session.last_evaluation = copy.deepcopy(scenario["evaluation"])
                             result["scenario"] = {"scenario_id": scenario["scenario_id"], "revision": scenario["revision"]}
                     trace.append({"tool": call.get("name"), "status": "ok", "result": result})
@@ -347,6 +468,7 @@ class SandboxAgent:
                     session.active_scenario_id = previous_session.active_scenario_id
                     session.workspace_id = previous_session.workspace_id
                     session.requested_constraints = previous_session.requested_constraints
+                    session.scenario_ids = previous_session.scenario_ids
                     error = str(exc)
                     trace.append({"tool": call.get("name"), "status": "rejected", "error": error})
                     return {"message": f"Tool call rejected: {error}", "session_id": session_id, "tool_trace": trace, "scene_state": copy.deepcopy(session.scene_state), "evaluation": session.last_evaluation}
@@ -356,3 +478,182 @@ class SandboxAgent:
             final_message = "Tool-call limit reached; no further action was taken."
         scenario = {"scenario_id": session.active_scenario_id, "revision": self.scenarios.get(session.active_scenario_id)["revision"]} if self.scenarios and session.active_scenario_id else None
         return {"message": final_message, "session_id": session_id, "tool_trace": trace, "scene_state": copy.deepcopy(session.scene_state), "evaluation": copy.deepcopy(session.last_evaluation), "scenario": scenario}
+
+    async def chat_project(
+        self,
+        project_id: str,
+        session_id: str,
+        message: str,
+        *,
+        confirmed_resolution_project_id: str | None = None,
+        confirmed_enrichment_plan_id: str | None = None,
+        confirmed_refresh_plan_id: str | None = None,
+        confirmed_ask_candidate_id: str | None = None,
+    ) -> dict:
+        if self.diligence is None:
+            raise ToolValidationError("Diligence orchestration is unavailable.")
+        if not isinstance(message, str) or not message.strip():
+            raise ToolValidationError("message must not be empty.")
+        project = self.diligence.get(project_id)
+        input_items = [{"role": "user", "content": f"[Diligence project_id: {project_id}]\n{message.strip()}"}]
+        trace, final_message = [], ""
+        for _ in range(10):
+            if hasattr(self.model, "respond_with_instructions"):
+                reply = await self.model.respond_with_instructions(input_items, DILIGENCE_TOOL_DEFINITIONS, DILIGENCE_SYSTEM_INSTRUCTIONS)
+            else:
+                reply = await self.model.respond(input_items, DILIGENCE_TOOL_DEFINITIONS)
+            if not reply.tool_calls:
+                final_message = reply.message or "No deterministic diligence action was taken."
+                break
+            input_items.extend(reply.response_items)
+            outputs = []
+            for call in reply.tool_calls:
+                try:
+                    arguments = json.loads(call["arguments"]) if isinstance(call.get("arguments"), str) else call.get("arguments")
+                    result = await self._execute_project_tool(
+                        project_id, call.get("name"), arguments,
+                        confirmed_resolution_project_id=confirmed_resolution_project_id,
+                        confirmed_enrichment_plan_id=confirmed_enrichment_plan_id,
+                        confirmed_refresh_plan_id=confirmed_refresh_plan_id,
+                        confirmed_ask_candidate_id=confirmed_ask_candidate_id,
+                    )
+                    trace.append({"tool": call.get("name"), "status": "ok", "result": result})
+                except (json.JSONDecodeError, KeyError, ToolValidationError, ConfirmationRequired, TypeError, ValueError) as exc:
+                    trace.append({"tool": call.get("name"), "status": "rejected", "error": str(exc)})
+                    return {"message": f"Tool call rejected: {exc}", "session_id": session_id, "project": self.diligence.get(project_id), "tool_trace": trace}
+                outputs.append({"type": "function_call_output", "call_id": call.get("id"), "output": json.dumps(result, sort_keys=True, separators=(",", ":"))})
+            input_items.extend(outputs)
+            project = self.diligence.get(project_id)
+        else:
+            final_message = "Tool-call limit reached; no further action was taken."
+        return {"message": final_message, "session_id": session_id, "project": self.diligence.get(project_id), "tool_trace": trace}
+
+    async def _execute_project_tool(
+        self,
+        project_id: str,
+        name: str | None,
+        arguments: Any,
+        *,
+        confirmed_resolution_project_id: str | None,
+        confirmed_enrichment_plan_id: str | None,
+        confirmed_refresh_plan_id: str | None,
+        confirmed_ask_candidate_id: str | None,
+    ) -> dict:
+        if not isinstance(arguments, dict):
+            raise ToolValidationError("Tool arguments must be a JSON object.")
+        if arguments.get("project_id") != project_id:
+            raise ToolValidationError("Tool project_id does not match this session.")
+        if name == "compile_project_request":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return copy.deepcopy(self.diligence.get(project_id)["request"])
+        if name == "get_discovery_capabilities":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return self.diligence.discovery_capabilities()
+        if name == "enumerate_supplied_candidates":
+            SandboxToolExecutor._only(arguments, {"project_id", "cursor", "limit"}, {"project_id", "cursor", "limit"})
+            return self.diligence.candidate_page(project_id, cursor=arguments["cursor"], limit=arguments["limit"])
+        if name == "resolve_candidate":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_id"}, {"project_id", "candidate_id"})
+            return await self.diligence.resolve_candidate(
+                project_id, arguments["candidate_id"],
+                confirmed_resolution=confirmed_resolution_project_id == project_id,
+            )
+        if name == "plan_mireye_fields":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return self.diligence.plan_fields(project_id)
+        if name == "quote_mireye_enrichment":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return await self.diligence.resolve_and_quote(
+                project_id, confirmed_resolution=confirmed_resolution_project_id == project_id,
+            )
+        if name == "confirm_and_fetch_enrichment":
+            SandboxToolExecutor._only(arguments, {"project_id", "spend_plan_id"}, {"project_id", "spend_plan_id"})
+            return await self.diligence.confirm_and_fetch(
+                project_id, arguments["spend_plan_id"],
+                confirmed=confirmed_enrichment_plan_id == arguments["spend_plan_id"],
+            )
+        if name in {"evaluate_candidates", "rank_candidates"}:
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return self.diligence.rank_candidates(project_id)
+        if name == "compare_candidates":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_ids"}, {"project_id", "candidate_ids"})
+            return self.diligence.compare_candidates(project_id, arguments["candidate_ids"])
+        if name == "check_evidence_freshness":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return self.diligence.check_now(project_id)
+        if name == "quote_mireye_refresh":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_id"}, {"project_id", "candidate_id"})
+            return await self.diligence.quote_candidate_refresh(project_id, arguments["candidate_id"])
+        if name == "confirm_and_refresh_evidence":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_id", "spend_plan_id"}, {"project_id", "candidate_id", "spend_plan_id"})
+            return await self.diligence.confirm_candidate_refresh(
+                project_id, arguments["candidate_id"], arguments["spend_plan_id"],
+                confirmed=confirmed_refresh_plan_id == arguments["spend_plan_id"],
+            )
+        if name == "get_evidence":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_id", "evidence_ids"}, {"project_id", "candidate_id", "evidence_ids"})
+            return self.diligence.get_evidence(project_id, arguments["candidate_id"], arguments["evidence_ids"])
+        if name == "ask_mireye_site":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_id", "question"}, {"project_id", "candidate_id", "question"})
+            return await self.diligence.ask_mireye_site(
+                project_id, arguments["candidate_id"], arguments["question"],
+                confirmed_candidate_id=confirmed_ask_candidate_id,
+            )
+        if name == "build_world_snapshot":
+            SandboxToolExecutor._only(arguments, {"project_id", "candidate_id"}, {"project_id", "candidate_id"})
+            return await self.diligence.build_world_snapshot(project_id, arguments["candidate_id"])
+        raise ToolValidationError(f"Tool is not available: {name}.")
+
+    async def _execute_intelligence_tool(
+        self,
+        snapshot: dict,
+        name: str | None,
+        arguments: Any,
+        *,
+        confirmed_refresh_plan_id: str | None,
+    ) -> dict:
+        if not isinstance(arguments, dict):
+            raise ToolValidationError("Tool arguments must be a JSON object.")
+        if name in {"check_evidence_freshness", "quote_mireye_refresh"}:
+            if self.intelligence is None:
+                raise ToolValidationError("MIREYE lifecycle tools are unavailable.")
+            SandboxToolExecutor._only(arguments, {"snapshot_id"}, {"snapshot_id"})
+            if arguments["snapshot_id"] != snapshot["snapshot_id"]:
+                raise ToolValidationError("Tool snapshot_id does not match this session.")
+            if name == "check_evidence_freshness":
+                return self.intelligence.freshness_status(snapshot["snapshot_id"])
+            return await self.intelligence.quote_refresh(snapshot["snapshot_id"])
+        if name == "confirm_and_refresh_evidence":
+            if self.intelligence is None:
+                raise ToolValidationError("MIREYE lifecycle tools are unavailable.")
+            SandboxToolExecutor._only(arguments, {"spend_plan_id"}, {"spend_plan_id"})
+            plan_id = arguments["spend_plan_id"]
+            if plan_id != confirmed_refresh_plan_id:
+                raise ConfirmationRequired("The application has not confirmed this MIREYE refresh spend plan.")
+            plan = self.intelligence.store.get_mireye_spend_plan(plan_id)
+            if plan is None or plan["snapshot_id"] != snapshot["snapshot_id"]:
+                raise ToolValidationError("Refresh spend plan does not belong to this SiteSnapshot.")
+            return await self.intelligence.confirm_and_refresh(plan_id, confirmed_by_application=True)
+        if name == "build_world_snapshot":
+            SandboxToolExecutor._only(arguments, {"snapshot_id"}, {"snapshot_id"})
+            if arguments["snapshot_id"] != snapshot["snapshot_id"]:
+                raise ToolValidationError("Tool snapshot_id does not match this session.")
+            if self.scenarios is None or self.scenarios.worlds is None:
+                raise ToolValidationError("WorldSnapshot support is unavailable.")
+            existing = self.scenarios.worlds.latest_for_site_snapshot(snapshot["snapshot_id"])
+            world = existing or await self.scenarios.worlds.create(site_snapshot_id=snapshot["snapshot_id"], requested_layers=["terrain", "roads"])
+            return {"world_snapshot_id": world["world_snapshot_id"], "reused": existing is not None}
+        if name == "branch_scenario":
+            SandboxToolExecutor._only(arguments, {"scenario_id", "user_intent"}, {"scenario_id", "user_intent"})
+            if self.scenarios is None:
+                raise ToolValidationError("Scenario persistence is unavailable.")
+            source = self.scenarios.get(arguments["scenario_id"])
+            if source["site_snapshot_id"] != snapshot["snapshot_id"]:
+                raise ToolValidationError("Scenario does not reference this SiteSnapshot.")
+            return self.scenarios.branch(arguments["scenario_id"], user_intent=arguments["user_intent"])
+        if name == "compare_scenarios":
+            SandboxToolExecutor._only(arguments, {"left_scenario_id", "right_scenario_id"}, {"left_scenario_id", "right_scenario_id"})
+            if self.scenarios is None:
+                raise ToolValidationError("Scenario persistence is unavailable.")
+            return self.scenarios.compare(arguments["left_scenario_id"], arguments["right_scenario_id"])
+        raise ToolValidationError(f"Tool is not available: {name}.")

@@ -36,6 +36,8 @@ class ScriptedModel:
 
 
 def test_openai_http_rejection_is_a_clear_model_unavailable_error(monkeypatch):
+    request_payload = {}
+
     class RejectedResponse:
         def raise_for_status(self):
             request = httpx.Request("POST", "https://api.openai.com/v1/responses")
@@ -53,12 +55,15 @@ def test_openai_http_rejection_is_a_clear_model_unavailable_error(monkeypatch):
         async def __aexit__(self, *_args):
             return None
 
-        async def post(self, *_args, **_kwargs):
+        async def post(self, *_args, **kwargs):
+            request_payload.update(kwargs["json"])
             return RejectedResponse()
 
     monkeypatch.setattr("app.sandbox_agent.httpx.AsyncClient", lambda **_kwargs: Client())
     with pytest.raises(ModelUnavailableError, match="Model access is unavailable"):
         _run(OpenAIResponsesModel(api_key="test-key").respond([], []))
+    assert request_payload["model"] == "gpt-5.6-sol"
+    assert request_payload["reasoning"] == {"effort": "high"}
 
 
 def test_openai_transport_failure_is_a_clear_model_unavailable_error(monkeypatch):
@@ -163,3 +168,80 @@ def test_invalid_tool_inputs_and_sequences_are_deterministic_without_mireye_acce
     assert not hasattr(tools_one, "mireye_client")
     assert {definition["name"] for definition in TOOL_DEFINITIONS}.isdisjoint({"fetch", "fetch_quote", "lookup", "mireye_fetch"})
     assert site_one["geometry"] == site_two["geometry"]
+
+
+def test_agent_exposes_phase6_evidence_constraints_without_fetch_tools():
+    constraint_ids = next(definition for definition in TOOL_DEFINITIONS if definition["name"] == "evaluate_scenario")["parameters"]["properties"]["requested_constraints"]["items"]["properties"]["constraint_id"]["enum"]
+    _site, tools = executor()
+    context = tools.execute("get_site_context", {"snapshot_id": "site-agent-test"})
+
+    assert {"max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in"}.issubset(constraint_ids)
+    assert "max_nwi_wetland_fraction_of_parcel" in context["available_constraints"]
+    assert "sufficient_grid_capacity" in context["unresolved_constraints"]
+
+
+def test_alternative_layout_branch_updates_session_and_remains_comparable():
+    site = snapshot()
+    base_scene = scene_state_from_snapshot(site)
+
+    class Scenarios:
+        def __init__(self):
+            self.records = {
+                "scenario-a": {"scenario_id": "scenario-a", "revision": 1, "site_snapshot_id": site["snapshot_id"], "workspace_id": "workspace-a", "scene_state": copy.deepcopy(base_scene), "evaluation": None, "requested_constraints": [], "parent_scenario_id": None},
+            }
+            self.compared = None
+
+        def get(self, scenario_id):
+            return copy.deepcopy(self.records[scenario_id])
+
+        def branch(self, scenario_id, *, user_intent):
+            result = {**copy.deepcopy(self.records[scenario_id]), "scenario_id": "scenario-b", "parent_scenario_id": scenario_id}
+            self.records["scenario-b"] = result
+            return copy.deepcopy(result)
+
+        def record_accepted_tool(self, _snapshot, *, active_scenario_id, scene_state, **_kwargs):
+            result = {**copy.deepcopy(self.records[active_scenario_id]), "revision": 2, "scene_state": copy.deepcopy(scene_state)}
+            self.records[active_scenario_id] = result
+            return copy.deepcopy(result)
+
+        def compare(self, left_scenario_id, right_scenario_id):
+            self.compared = (left_scenario_id, right_scenario_id)
+            return {"left": left_scenario_id, "right": right_scenario_id}
+
+    model = ScriptedModel([
+        call("get_site_context", {"snapshot_id": site["snapshot_id"]}),
+        call("branch_scenario", {"scenario_id": "scenario-a", "user_intent": "Try a second layout."}),
+        call("transform_object", {"object_id": "data_center_1", "operation": "move", "delta_x_m": 10, "delta_y_m": 0, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None}),
+        call("evaluate_scenario", {"requested_constraints": [{"constraint_id": "footprint_inside_parcel"}]}),
+        ModelReply(message="Alternative created.", tool_calls=[], response_items=[]),
+        call("get_site_context", {"snapshot_id": site["snapshot_id"]}),
+        call("compare_scenarios", {"left_scenario_id": "scenario-a", "right_scenario_id": "scenario-b"}),
+        ModelReply(message="Compared.", tool_calls=[], response_items=[]),
+    ])
+    scenarios = Scenarios()
+    agent = SandboxAgent(model=model, sessions=InMemorySandboxSessions(), scenarios=scenarios)
+
+    alternative = _run(agent.chat(site, "branch-session", "Try a second layout.", scenario_id="scenario-a"))
+    compared = _run(agent.chat(site, "branch-session", "Compare the two layouts."))
+
+    assert alternative["scenario"]["scenario_id"] == "scenario-b"
+    assert scenarios.records["scenario-a"]["scene_state"] == base_scene
+    assert scenarios.compared == ("scenario-a", "scenario-b")
+    assert "available scenario_ids: scenario-a, scenario-b" in model.calls[5]["input"][0]["content"]
+    assert [item["tool"] for item in alternative["tool_trace"]] == ["get_site_context", "branch_scenario", "transform_object", "evaluate_scenario"]
+    assert [item["tool"] for item in compared["tool_trace"]] == ["get_site_context", "compare_scenarios"]
+
+
+def test_alternative_claim_without_geometry_change_is_rejected_after_bounded_retries():
+    model = ScriptedModel([
+        ModelReply(message="I created an alternative layout.", tool_calls=[], response_items=[]),
+        ModelReply(message="The new geometry is ready.", tool_calls=[], response_items=[]),
+        ModelReply(message="The alternative was completed.", tool_calls=[], response_items=[]),
+    ])
+    agent = SandboxAgent(model=model, sessions=InMemorySandboxSessions())
+
+    response = _run(agent.chat(snapshot(), "false-change", "Try another layout."))
+
+    assert response["message"] == "No validated alternative layout was produced; the existing layout remains unchanged."
+    assert response["scene_state"]["proposed"] == []
+    assert len(model.calls) == 3

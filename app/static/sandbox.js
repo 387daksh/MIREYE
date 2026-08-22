@@ -4,10 +4,14 @@
   const snapshotEndpoint = () => `/v1/sandbox/site/snapshots/${encodeURIComponent(snapshotId())}`;
   const chatEndpoint = () => `/v1/sandbox/${encodeURIComponent(snapshotId())}/chat`;
   const scenarioEndpoint = () => `/v1/sandbox/${encodeURIComponent(snapshotId())}/scenarios`;
+  const freshnessEndpoint = () => `/v1/sandbox/site/${encodeURIComponent(snapshotId())}/freshness`;
+  const refreshQuoteEndpoint = () => `/v1/sandbox/site/${encodeURIComponent(snapshotId())}/refresh/quote`;
   let sceneState;
   let snapshotData;
+  let worldData = null;
   let activeScenarioId = null;
   const scenarioRevisions = new Map();
+  let activeSpendPlan = null;
   let map;
   const chatSessionId = window.crypto && window.crypto.randomUUID ? window.crypto.randomUUID() : `sandbox-${Date.now()}`;
 
@@ -20,11 +24,15 @@
     return new URLSearchParams(window.location.search).get("scenario");
   }
 
+  function requestedWorldSnapshotId() {
+    return new URLSearchParams(window.location.search).get("world");
+  }
+
   function showError(message) {
     const error = document.getElementById("sandboxError");
     error.textContent = message;
     error.hidden = false;
-    document.getElementById("snapshotState").textContent = "SNAPSHOT UNAVAILABLE";
+    document.getElementById("snapshotState").textContent = "Site unavailable";
   }
 
   function localToLngLat(x, y, frame) {
@@ -63,34 +71,41 @@
     if (source) source.setData(data);
   }
 
-  function updateProposedObject() {
-    const object = sceneState.proposed[0];
-    if (!object) return;
-    object.attributes.capacity_mw = Number(document.getElementById("capacityMw").value);
-    object.geometry_local.height_m = Number(document.getElementById("heightM").value);
-    object.geometry_local.width_m = Number(document.getElementById("widthM").value);
-    object.geometry_local.length_m = Number(document.getElementById("lengthM").value);
-    object.geometry_local.rotation_deg = Number(document.getElementById("rotationDeg").value);
-    setSourceData("sandbox-proposed", proposedFeatures());
-    renderScenarioFacts(activeScenarioId ? { scenario_id: activeScenarioId, revision: scenarioRevisions.get(activeScenarioId) } : null, null);
-  }
-
-  function bindControls() {
-    ["capacityMw", "heightM", "widthM", "lengthM", "rotationDeg"].forEach((id) => {
-      document.getElementById(id).addEventListener("input", updateProposedObject);
-    });
-  }
-
   function syncControls() {
     const object = sceneState.proposed[0];
-    ["capacityMw", "heightM", "widthM", "lengthM", "rotationDeg"].forEach((id) => { document.getElementById(id).disabled = !object; });
-    if (object) {
-      document.getElementById("capacityMw").value = object.attributes.capacity_mw;
-      document.getElementById("heightM").value = object.geometry_local.height_m;
-      document.getElementById("widthM").value = object.geometry_local.width_m;
-      document.getElementById("lengthM").value = object.geometry_local.length_m;
-      document.getElementById("rotationDeg").value = object.geometry_local.rotation_deg;
-    }
+    const facts = object ? [
+      ["Capacity", `${Number(object.attributes.capacity_mw)} MW`],
+      ["Footprint", `${Number(object.geometry_local.width_m)} × ${Number(object.geometry_local.length_m)} m`],
+      ["Height", `${Number(object.geometry_local.height_m)} m`],
+      ["Rotation", `${Number(object.geometry_local.rotation_deg)}°`],
+    ] : [["Status", "No proposed design"]];
+    renderFactsList(document.getElementById("designFacts"), facts);
+  }
+
+  const constraintNames = {
+    footprint_inside_parcel: "Fits inside parcel", minimum_setback: "Setback", footprint_area: "Footprint area",
+    parcel_coverage: "Parcel coverage", object_collision: "Blocked areas", resolution_point_outside_fema_sfha: "Flood at resolution point",
+    max_nwi_wetland_fraction_of_parcel: "Mapped wetlands", max_nwi_wetland_acres_on_parcel: "Mapped wetlands",
+    max_resolution_point_slope_degrees: "Slope at resolution point", max_resolution_point_substation_distance_m: "Substation proximity",
+    max_resolution_point_transmission_distance_m: "Transmission proximity", max_resolution_point_major_road_distance_m: "Road proximity",
+    parcel_zoning_code_in: "Raw zoning code", parcel_outside_fema_sfha: "Whole-parcel flood", industrial_zoning: "Industrial zoning",
+    sufficient_grid_capacity: "Grid capacity", legal_access: "Legal road access",
+  };
+
+  function constraintName(id) {
+    return constraintNames[id] || String(id).replaceAll("_", " ").replace(/^./, (value) => value.toUpperCase());
+  }
+
+  function renderFactsList(element, facts) {
+    element.replaceChildren(...facts.map(([term, value]) => {
+      const row = document.createElement("div");
+      const label = document.createElement("dt");
+      const detail = document.createElement("dd");
+      label.textContent = term;
+      detail.textContent = value;
+      row.append(label, detail);
+      return row;
+    }));
   }
 
   function stateBadge(outcome) {
@@ -103,26 +118,23 @@
   function renderEvaluation(container, evaluation) {
     container.replaceChildren();
     const summary = document.createElement("div");
-    summary.className = "sandbox-evaluation-summary";
+    summary.className = "evaluation-summary";
     summary.append(stateBadge(evaluation.overall_status));
     const summaryText = document.createElement("span");
-    summaryText.textContent = `${evaluation.constraint_results.length} deterministic constraint result(s)`;
+    summaryText.textContent = `${evaluation.constraint_results.length} requirement${evaluation.constraint_results.length === 1 ? "" : "s"} checked`;
     summary.append(summaryText);
     container.append(summary);
     evaluation.constraint_results.forEach((item) => {
       const row = document.createElement("div");
-      row.className = "sandbox-evaluation-item";
+      row.className = "evaluation-item";
       row.append(stateBadge(item.outcome));
       const copy = document.createElement("div");
-      copy.className = "sandbox-evaluation-copy";
+      copy.className = "evaluation-copy";
       const title = document.createElement("strong");
-      title.textContent = item.constraint_id;
+      title.textContent = constraintName(item.constraint_id);
       const reason = document.createElement("p");
       reason.textContent = item.explanation;
-      const evidence = document.createElement("div");
-      evidence.className = "sandbox-evidence-ids";
-      evidence.textContent = `Evidence: ${item.evidence_ids.length ? item.evidence_ids.join(", ") : "derived calculation"}`;
-      copy.append(title, reason, evidence);
+      copy.append(title, reason);
       row.append(copy);
       container.append(row);
     });
@@ -133,22 +145,11 @@
     const object = sceneState && sceneState.proposed[0];
     const metrics = object && evaluation ? evaluation.derived_geometry_metrics[object.id] : null;
     const facts = [
-      ["Scenario", scenario ? scenario.scenario_id : "Unsaved session"],
-      ["Revision", scenario ? scenario.revision : "-"],
       ["Capacity", object ? `${Number(object.attributes.capacity_mw)} MW` : "No proposal"],
-      ["Footprint", metrics ? `${Number(metrics.footprint_area_m2).toLocaleString()} m2` : object ? `${(Number(object.geometry_local.width_m) * Number(object.geometry_local.length_m)).toLocaleString()} m2` : "-"],
+      ["Footprint", metrics ? `${Number(metrics.footprint_area_m2).toLocaleString()} m²` : object ? `${(Number(object.geometry_local.width_m) * Number(object.geometry_local.length_m)).toLocaleString()} m²` : "-"],
       ["Evaluation", evaluation ? evaluation.overall_status : "UNRESOLVED"],
     ];
-    const element = document.getElementById("scenarioFacts");
-    element.replaceChildren(...facts.map(([term, value]) => {
-      const row = document.createElement("div");
-      const label = document.createElement("dt");
-      const detail = document.createElement("dd");
-      label.textContent = term;
-      detail.textContent = value;
-      row.append(label, detail);
-      return row;
-    }));
+    renderFactsList(document.getElementById("scenarioFacts"), facts);
   }
 
   function renderChatResult(result) {
@@ -157,16 +158,20 @@
     const trace = document.getElementById("chatTrace");
     const evaluation = document.getElementById("chatEvaluation");
     response.textContent = result.message;
-    trace.textContent = result.tool_trace.map((item) => `${item.status.toUpperCase()} ${item.tool}`).join(" | ");
+    const activity = {
+      get_site_context: "Reviewed the site", propose_data_center: "Created a proposed facility", transform_object: "Updated the layout",
+      evaluate_scenario: "Re-evaluated the site", get_evidence: "Reviewed MIREYE sources", remove_object: "Removed a proposed object",
+      reset_proposals: "Reset proposed designs", check_evidence_freshness: "Checked MIREYE freshness",
+      quote_mireye_refresh: "Prepared a refresh estimate", confirm_and_refresh_evidence: "Refreshed MIREYE intelligence",
+    };
+    trace.textContent = result.tool_trace.map((item) => activity[item.tool] || "Completed a validated site action").join(" · ");
     trace.hidden = !trace.textContent;
     if (result.evaluation) {
       renderEvaluation(evaluation, result.evaluation);
-      chatState.textContent = result.evaluation.overall_status;
-      chatState.className = `sandbox-state ${result.evaluation.overall_status.toLowerCase()}`;
+      chatState.textContent = `Evaluation: ${result.evaluation.overall_status}`;
     } else {
       evaluation.hidden = true;
-      chatState.textContent = "READY";
-      chatState.className = "sandbox-state derived";
+      chatState.textContent = "Ready";
     }
     if (result.scenario) registerScenario(result.scenario, result.evaluation);
     else renderScenarioFacts(null, result.evaluation);
@@ -182,7 +187,9 @@
       option.value = scenario.scenario_id;
       select.append(option);
     }
-    option.textContent = `${scenario.scenario_id.slice(0, 12)} / rev ${scenario.revision}`;
+    const label = scenarioLabel(scenario.scenario_id);
+    const scenarioScene = scenario.scene_state || sceneState;
+    option.textContent = `${label} · ${scenarioScene.proposed[0] ? Number(scenarioScene.proposed[0].attributes.capacity_mw) + " MW" : "No proposal"}`;
     select.value = scenario.scenario_id;
     const compareSelect = document.getElementById("scenarioCompareSelect");
     let compareOption = Array.from(compareSelect.options).find((item) => item.value === scenario.scenario_id);
@@ -192,11 +199,17 @@
       compareSelect.append(compareOption);
     }
     compareOption.textContent = option.textContent;
-    document.getElementById("scenarioTitle").textContent = scenario.scenario_id;
-    document.getElementById("scenarioRevision").textContent = `REV ${scenario.revision}`;
+    document.getElementById("scenarioTitle").textContent = label;
+    document.getElementById("scenarioRevision").textContent = "Saved";
     document.getElementById("scenarioBranch").disabled = false;
     document.getElementById("scenarioCompare").disabled = scenarioRevisions.size < 2;
     renderScenarioFacts(scenario, evaluation);
+  }
+
+  function scenarioLabel(scenarioId) {
+    const ids = Array.from(scenarioRevisions.keys());
+    const index = ids.indexOf(scenarioId);
+    return `Scenario ${String.fromCharCode(65 + Math.max(0, index))}`;
   }
 
   function applyScenarioScene(nextScene) {
@@ -215,6 +228,7 @@
         workspace_id: snapshotData.workspace_id,
         user_intent: document.getElementById("scenarioIntent").value.trim(),
         scene_state: sceneState,
+        world_snapshot_id: sceneState.world_snapshot_id || null,
       }),
     });
     const scenario = await response.json();
@@ -256,7 +270,28 @@
     const comparison = await response.json();
     if (!response.ok) throw new Error(comparison.detail || "Scenario comparison failed.");
     const output = document.getElementById("scenarioComparison");
-    output.textContent = `${comparison.dominance.result.toUpperCase()} | ${comparison.what_changed.join(" ")}`;
+    const leftName = scenarioLabel(activeScenarioId);
+    const rightName = scenarioLabel(other);
+    const changedConstraints = Object.entries(comparison.constraint_changes || {}).map(([id, values]) => [
+      constraintName(id), values.before ? values.before.outcome : "—", values.after ? values.after.outcome : "—",
+    ]);
+    const rows = changedConstraints.length ? changedConstraints : [["Deterministic outcome", "No change", "No change"]];
+    output.replaceChildren();
+    const heading = document.createElement("div");
+    heading.className = "comparison-row";
+    ["", leftName, rightName].forEach((text) => { const cell = document.createElement("span"); cell.textContent = text; heading.append(cell); });
+    output.append(heading);
+    rows.forEach((values) => {
+      const row = document.createElement("div"); row.className = "comparison-row";
+      values.forEach((text) => { const cell = document.createElement("span"); cell.textContent = text; row.append(cell); });
+      output.append(row);
+    });
+    const summary = document.createElement("div");
+    summary.className = "comparison-summary";
+    summary.textContent = comparison.dominance.result === "neither"
+      ? `${comparison.what_changed.join(" ")} Neither option dominates under the current deterministic evaluation.`
+      : `${comparison.dominance.result === "left" ? leftName : rightName} is stronger under the matching evaluated requirements.`;
+    output.append(summary);
     output.hidden = false;
   }
 
@@ -266,13 +301,12 @@
     const message = input.value.trim();
     if (!message) return;
     button.disabled = true;
-    document.getElementById("chatState").textContent = "WORKING";
-    document.getElementById("chatState").className = "sandbox-state derived";
+    document.getElementById("chatState").textContent = "Working with the site…";
     try {
       const response = await fetch(chatEndpoint(), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ message, session_id: chatSessionId, workspace_id: snapshotData.workspace_id, scenario_id: activeScenarioId }),
+        body: JSON.stringify({ message, session_id: chatSessionId, workspace_id: snapshotData.workspace_id, scenario_id: activeScenarioId, world_snapshot_id: sceneState.world_snapshot_id || null }),
       });
       const result = await response.json();
       if (!response.ok) throw new Error(result.detail || "Sandbox chat failed.");
@@ -281,8 +315,7 @@
       input.value = "";
     } catch (error) {
       document.getElementById("chatResponse").textContent = error.message || "Sandbox chat failed.";
-      document.getElementById("chatState").textContent = "UNAVAILABLE";
-      document.getElementById("chatState").className = "sandbox-state fail";
+      document.getElementById("chatState").textContent = "Mireye couldn't complete that change.";
     } finally {
       button.disabled = false;
     }
@@ -293,29 +326,184 @@
     const evidence = snapshot.evidence;
     const areaM2 = Number(evidence.parcel_area_m2 && evidence.parcel_area_m2.value);
     const area = Number.isFinite(areaM2) ? `${areaM2.toLocaleString()} m2 / ${(areaM2 / 4046.8564224).toFixed(2)} acres` : "Not provided";
-    const freshness = snapshot.is_expired ? "STALE" : `CURRENT until ${new Date(snapshot.expires_at * 1000).toLocaleString()}`;
     const facts = [
-      ["Parcel", identity.parcel_id],
-      ["Address", identity.parcel_address || "Not provided"],
       ["Area", area],
-      ["Geometry source", identity.parcel_data_source || "MIREYE"],
-      ["Match", `${identity.parcel_match_type} / ${identity.parcel_match_distance_m} m`],
-      ["Zoning", evidence.parcel_zoning.value || "Not provided"],
-      ["Evidence freshness", freshness],
+      ["Zoning code", evidence.parcel_zoning.value || "Unresolved"],
+      ["Parcel match", identity.parcel_match_type === "exact_intersect" ? "Verified exact" : "Unresolved"],
     ];
-    const factsElement = document.getElementById("snapshotFacts");
-    factsElement.replaceChildren(...facts.map(([term, value]) => {
+    renderFactsList(document.getElementById("snapshotFacts"), facts);
+    document.getElementById("parcelTitle").textContent = identity.parcel_address || identity.parcel_id;
+    document.getElementById("siteName").textContent = identity.parcel_address || "Verified property";
+    document.getElementById("parcelMeta").textContent = `${identity.parcel_data_source || "MIREYE"} · exact parcel match`;
+    document.getElementById("snapshotState").textContent = snapshot.is_expired ? "Site intelligence needs an update" : "MIREYE intelligence current";
+    renderSources(snapshot);
+  }
+
+  function renderSources(snapshot) {
+    const now = Date.now() / 1000;
+    const rows = Object.values(snapshot.evidence || {}).sort((a, b) => String(a.field).localeCompare(String(b.field))).map((record) => {
       const row = document.createElement("div");
-      const label = document.createElement("dt");
-      const detail = document.createElement("dd");
-      label.textContent = term;
-      detail.textContent = value;
-      row.append(label, detail);
+      row.className = "source-row";
+      const name = document.createElement("strong");
+      const source = document.createElement("span");
+      const freshness = document.createElement("span");
+      name.textContent = constraintName(record.field);
+      source.textContent = `${record.source || "MIREYE source"} · ${record.confidence || "confidence not stated"}`;
+      const fresh = Number(record.expires_at) > now && record.value != null && ["ok", null, undefined].includes(record.status);
+      freshness.className = fresh ? "fresh" : "stale";
+      freshness.textContent = fresh ? `Current · captured ${relativeTime(record.observed_at)}` : "Stale or unresolved";
+      row.append(name, source, freshness);
+      return row;
+    });
+    document.getElementById("sourcesList").replaceChildren(...rows);
+  }
+
+  function relativeTime(timestamp) {
+    const seconds = Math.max(0, Math.round(Date.now() / 1000 - Number(timestamp || 0)));
+    if (seconds < 60) return "just now";
+    if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`;
+    return `${Math.floor(seconds / 86400)} days ago`;
+  }
+
+  function renderMireyeFreshness(payload) {
+    const fresh = payload.fresh_fields || [];
+    const stale = [...(payload.stale_fields || []), ...(payload.missing_fields || []), ...(payload.incompatible_fields || []), ...(payload.deprecated_fields || [])];
+    const state = document.getElementById("mireyeFreshnessState");
+    const cached = Object.values(snapshotData.evidence || {}).filter((record) => record.carried_from_snapshot_id).length;
+    renderFactsList(document.getElementById("mireyeFreshnessFacts"), [["Verified", String(fresh.length)], ["Unresolved", String(stale.length)], ["Cached", String(cached)]]);
+    state.className = `status-dot ${payload.refresh_required ? "unresolved" : "pass"}`;
+    document.getElementById("intelligenceHeadline").textContent = payload.refresh_required ? "Update recommended" : `Refreshed ${relativeTime(snapshotData.observed_at)}`;
+    document.getElementById("mireyeRefreshQuote").disabled = !payload.refresh_required;
+    document.getElementById("mireyeRefreshNote").textContent = payload.refresh_required
+      ? `${stale.length} field${stale.length === 1 ? " is" : "s are"} stale or unresolved.`
+      : `${fresh.length} fields are within their recorded freshness windows.`;
+  }
+
+  async function loadMireyeFreshness() {
+    const response = await fetch(freshnessEndpoint());
+    const payload = await response.json();
+    if (!response.ok) throw new Error(payload.detail || "Evidence freshness check failed.");
+    renderMireyeFreshness(payload);
+  }
+
+  async function quoteMireyeRefresh() {
+    const button = document.getElementById("mireyeRefreshQuote");
+    button.disabled = true;
+    try {
+      const response = await fetch(refreshQuoteEndpoint(), { method: "POST" });
+      const plan = await response.json();
+      if (!response.ok) throw new Error(plan.detail || "MIREYE refresh quote failed.");
+      if (plan.status === "NO_REFRESH_REQUIRED") {
+        renderMireyeFreshness(plan.freshness);
+        return;
+      }
+      activeSpendPlan = plan;
+      const credits = plan.expected_credits == null ? "an unavailable credit estimate" : `${plan.expected_credits} credits`;
+      const expiry = new Date(plan.quote_expires_at * 1000).toLocaleString();
+      document.getElementById("refreshQuoteText").textContent = `${plan.requested_fields.length} fields need an update. Estimated cost: ${credits}. Quote expires ${expiry}. Nothing has been charged.`;
+      document.getElementById("refreshConfirmPanel").hidden = false;
+      document.getElementById("mireyeRefreshConfirm").disabled = false;
+    } catch (error) {
+      document.getElementById("mireyeRefreshNote").textContent = error.message || "MIREYE couldn't prepare a refresh estimate.";
+    } finally {
+      button.disabled = false;
+    }
+  }
+
+  async function confirmMireyeRefresh() {
+    if (!activeSpendPlan) return;
+    const button = document.getElementById("mireyeRefreshConfirm");
+    button.disabled = true;
+    try {
+      const response = await fetch(`/v1/sandbox/site/refresh/${encodeURIComponent(activeSpendPlan.spend_plan_id)}/confirm`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ confirmed: true }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.detail || "MIREYE refresh failed.");
+      window.sessionStorage.setItem("mireyeRefreshResult", JSON.stringify({
+        snapshot_id: result.snapshot.snapshot_id,
+        changed_values: Object.keys(result.snapshot_diff.field_changes || {}).length,
+        reevaluated_scenarios: (result.evaluation_runs || []).length,
+      }));
+      window.location.assign(`/sandbox/${encodeURIComponent(result.snapshot.snapshot_id)}`);
+    } catch (error) {
+      document.getElementById("mireyeRefreshNote").textContent = `${error.message || "MIREYE couldn't refresh this site."} Your previous site intelligence is still available.`;
+      button.disabled = false;
+    }
+  }
+
+  function worldLayer(name) {
+    return worldData && worldData.layers.find((layer) => layer.layer === name);
+  }
+
+  function renderWorld() {
+    if (!worldData) return;
+    const terrain = worldLayer("terrain");
+    const roads = worldLayer("roads");
+    const warnings = worldData.layers.flatMap((layer) => layer.warnings || []);
+    const conflicts = worldData.quality_conflicts || [];
+    const facts = [
+      ["Terrain", terrain && terrain.availability === "AVAILABLE" ? `${terrain.terrain.actual_resolution_m} m / ${terrain.terrain.vertical_reference}` : "Unavailable"],
+      ["Road features", roads && roads.availability === "AVAILABLE" ? String(roads.roads.feature_count) : "Unavailable"],
+      ["Conflicts", String(conflicts.length)],
+    ];
+    renderFactsList(document.getElementById("worldFacts"), facts);
+    const sources = document.getElementById("worldSources");
+    sources.replaceChildren(...worldData.source_manifest.map((entry) => {
+      const row = document.createElement("div");
+      const source = entry.source;
+      row.textContent = `${entry.layer}: ${source.provider}, ${source.release || source.source_id || source.dataset}`;
       return row;
     }));
-    document.getElementById("parcelTitle").textContent = identity.parcel_address || identity.parcel_id;
-    document.getElementById("parcelMeta").textContent = `${identity.parcel_id} | ${identity.parcel_match_type}`;
-    document.getElementById("snapshotState").textContent = snapshot.is_expired ? "SNAPSHOT STALE" : "MIREYE SNAPSHOT";
+    document.getElementById("worldWarning").textContent = conflicts.length
+      ? `CONFLICT: ${conflicts.join(" ")}`
+      : warnings.join(" ");
+    document.getElementById("worldState").textContent = conflicts.length ? "Source conflict" : "Observed layers";
+    document.getElementById("worldPanel").hidden = false;
+    document.getElementById("worldDetails").hidden = false;
+    document.getElementById("groundStateChip").textContent = terrain && terrain.availability === "AVAILABLE"
+      ? `Observed USGS terrain · ${terrain.terrain.actual_resolution_m} m resolution`
+      : "Conceptual flat ground";
+  }
+
+  async function loadWorld(worldSnapshotId) {
+    if (!worldSnapshotId) return null;
+    const response = await fetch(`/v1/sandbox/world-snapshots/${encodeURIComponent(worldSnapshotId)}`);
+    const world = await response.json();
+    if (!response.ok) throw new Error(world.detail || "The observed terrain and road layers could not be loaded.");
+    if (world.site_snapshot_id !== snapshotId()) throw new Error("These observed world layers belong to a different site.");
+    return world;
+  }
+
+  function addWorldLayers() {
+    if (!worldData) return;
+    const terrain = worldLayer("terrain");
+    const roads = worldLayer("roads");
+    if (terrain && terrain.availability === "AVAILABLE") {
+      map.addSource("world-terrain", {
+        type: "raster-dem", tiles: terrain.render.tiles, tileSize: terrain.render.tile_size,
+        minzoom: terrain.render.minzoom, maxzoom: terrain.render.maxzoom, encoding: terrain.render.encoding,
+      });
+      map.setTerrain({ source: "world-terrain", exaggeration: 1 });
+      document.getElementById("terrainToggle").disabled = false;
+    }
+    if (roads && roads.availability === "AVAILABLE") {
+      map.addSource("world-roads", { type: "geojson", data: roads.render.url });
+      map.addLayer({ id: "world-roads-line", type: "line", source: "world-roads", paint: { "line-color": "#334155", "line-width": 2.4, "line-opacity": 0.9 } });
+      document.getElementById("roadsToggle").disabled = false;
+    }
+  }
+
+  function bindWorldControls() {
+    document.getElementById("terrainToggle").addEventListener("change", (event) => {
+      if (map && map.getSource("world-terrain")) map.setTerrain(event.target.checked ? { source: "world-terrain", exaggeration: 1 } : null);
+    });
+    document.getElementById("roadsToggle").addEventListener("change", (event) => {
+      if (map && map.getLayer("world-roads-line")) map.setLayoutProperty("world-roads-line", "visibility", event.target.checked ? "visible" : "none");
+    });
   }
 
   function addSceneLayers() {
@@ -324,6 +512,7 @@
     const centroid = sceneState.derived.find((object) => object.id === "parcel_centroid");
     const ground = sceneState.derived.find((object) => object.id === "flat_ground_plane");
 
+    addWorldLayers();
     map.addSource("sandbox-ground", { type: "geojson", data: { type: "Feature", geometry: ground.geometry } });
     map.addLayer({ id: "sandbox-ground-fill", type: "fill", source: "sandbox-ground", paint: { "fill-color": "#64748b", "fill-opacity": 0.12 } });
     map.addSource("sandbox-parcel", { type: "geojson", data: { type: "Feature", geometry: parcel.geometry } });
@@ -332,14 +521,14 @@
     map.addSource("sandbox-point", { type: "geojson", data: { type: "Feature", geometry: point.geometry } });
     map.addLayer({ id: "sandbox-point-circle", type: "circle", source: "sandbox-point", paint: { "circle-radius": 7, "circle-color": "#0e7490", "circle-stroke-width": 2, "circle-stroke-color": "#ffffff" } });
     map.addSource("sandbox-centroid", { type: "geojson", data: { type: "Feature", geometry: centroid.geometry } });
-    map.addLayer({ id: "sandbox-centroid-circle", type: "circle", source: "sandbox-centroid", paint: { "circle-radius": 4, "circle-color": "#6d28d9" } });
+    map.addLayer({ id: "sandbox-centroid-circle", type: "circle", source: "sandbox-centroid", paint: { "circle-radius": 4, "circle-color": "#315b86" } });
     map.addSource("sandbox-proposed", { type: "geojson", data: proposedFeatures() });
     map.addLayer({
       id: "sandbox-proposed-extrusion",
       type: "fill-extrusion",
       source: "sandbox-proposed",
       paint: {
-        "fill-extrusion-color": "#f97316",
+        "fill-extrusion-color": "#e95920",
         "fill-extrusion-height": ["get", "height_m"],
         "fill-extrusion-base": 0,
         "fill-extrusion-opacity": 0.78,
@@ -364,7 +553,7 @@
       style: {
         version: 8,
         sources: {},
-        layers: [{ id: "conceptual-background", type: "background", paint: { "background-color": "#dbeafe" } }],
+        layers: [{ id: "conceptual-background", type: "background", paint: { "background-color": "#dfe8e4" } }],
       },
       center: [sceneState.camera.center.lng, sceneState.camera.center.lat],
       zoom: sceneState.camera.zoom,
@@ -373,19 +562,20 @@
       maxPitch: 75,
       attributionControl: true,
     });
+    window.MireyeSandboxMap = map;
     map.addControl(new maplibregl.NavigationControl({ visualizePitch: true }), "top-right");
     map.on("load", addSceneLayers);
     map.on("moveend", () => {
       const center = map.getCenter();
       sceneState.camera = { center: { lng: center.lng, lat: center.lat }, zoom: map.getZoom(), pitch: map.getPitch(), bearing: map.getBearing() };
-      document.getElementById("cameraReadout").textContent = `PITCH ${Math.round(sceneState.camera.pitch)} | BEARING ${Math.round(sceneState.camera.bearing)}`;
+      document.getElementById("cameraReadout").textContent = `${Math.round(sceneState.camera.pitch)}° pitch · ${Math.round(sceneState.camera.bearing)}° bearing`;
     });
   }
 
   async function loadSandbox() {
     const id = snapshotId();
     if (!id) {
-      showError("A SiteSnapshot ID is required.");
+      showError("Choose a verified site before opening the workspace.");
       return;
     }
     try {
@@ -393,7 +583,7 @@
       if (!sceneResponse.ok || !snapshotResponse.ok) {
         const response = !sceneResponse.ok ? sceneResponse : snapshotResponse;
         const error = await response.json().catch(() => ({}));
-        throw new Error(error.detail || `Snapshot request failed (${response.status}).`);
+        throw new Error(error.detail || "The site could not be loaded.");
       }
       sceneState = await sceneResponse.json();
       const snapshot = await snapshotResponse.json();
@@ -402,18 +592,35 @@
       if (initialScenarioId) {
         const scenarioResponse = await fetch(`/v1/sandbox/scenarios/${encodeURIComponent(initialScenarioId)}`);
         const scenario = await scenarioResponse.json();
-        if (!scenarioResponse.ok) throw new Error(scenario.detail || "Initial scenario request failed.");
-        if (scenario.site_snapshot_id !== id) throw new Error("Initial scenario does not reference this SiteSnapshot.");
+        if (!scenarioResponse.ok) throw new Error(scenario.detail || "The requested design option could not be loaded.");
+        if (scenario.site_snapshot_id !== id) throw new Error("That design option belongs to a different site.");
         sceneState = scenario.scene_state;
         registerScenario(scenario);
       } else {
+        const requestedWorldId = requestedWorldSnapshotId();
+        if (requestedWorldId) sceneState.world_snapshot_id = requestedWorldId;
         renderScenarioFacts(null, null);
       }
+      worldData = await loadWorld(sceneState.world_snapshot_id);
+      renderWorld();
       window.MireyeSandboxScene = sceneState;
       renderFacts(snapshot);
+      try {
+        await loadMireyeFreshness();
+        const refreshResult = JSON.parse(window.sessionStorage.getItem("mireyeRefreshResult") || "null");
+        if (refreshResult && refreshResult.snapshot_id === id) {
+          document.getElementById("intelligenceHeadline").textContent = "MIREYE refreshed the site";
+          document.getElementById("mireyeRefreshNote").textContent = `${refreshResult.changed_values} value${refreshResult.changed_values === 1 ? "" : "s"} changed. ${refreshResult.reevaluated_scenarios} scenario${refreshResult.reevaluated_scenarios === 1 ? " was" : "s were"} re-evaluated.`;
+          window.sessionStorage.removeItem("mireyeRefreshResult");
+        }
+      } catch (error) {
+        document.getElementById("mireyeFreshnessState").className = "status-dot fail";
+        document.getElementById("intelligenceHeadline").textContent = "Freshness unavailable";
+        document.getElementById("mireyeRefreshNote").textContent = error.message || "MIREYE freshness could not be checked.";
+      }
       syncControls();
       initializeMap();
-      bindControls();
+      bindWorldControls();
       document.querySelectorAll(".sandbox-demo-prompts button").forEach((button) => {
         button.addEventListener("click", () => {
           document.getElementById("chatMessage").value = button.textContent;
@@ -425,8 +632,20 @@
       document.getElementById("scenarioBranch").addEventListener("click", () => branchScenario().catch(showError));
       document.getElementById("scenarioSelect").addEventListener("change", () => selectScenario().catch(showError));
       document.getElementById("scenarioCompare").addEventListener("click", () => compareScenarios().catch(showError));
+      document.getElementById("mireyeRefreshQuote").addEventListener("click", () => quoteMireyeRefresh().catch(showError));
+      document.getElementById("mireyeRefreshConfirm").addEventListener("click", () => confirmMireyeRefresh().catch(showError));
+      document.getElementById("mireyeRefreshCancel").addEventListener("click", () => {
+        activeSpendPlan = null;
+        document.getElementById("refreshConfirmPanel").hidden = true;
+        document.getElementById("mireyeRefreshConfirm").disabled = true;
+      });
+      document.getElementById("viewSources").addEventListener("click", () => document.getElementById("sourcesDialog").showModal());
+      document.getElementById("closeSources").addEventListener("click", () => document.getElementById("sourcesDialog").close());
+      document.getElementById("chatMessage").addEventListener("keydown", (event) => {
+        if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); sendChat(); }
+      });
     } catch (error) {
-      showError(error.message || "Unable to load SiteSnapshot.");
+      showError(error.message || "Unable to load this site.");
     }
   }
 
