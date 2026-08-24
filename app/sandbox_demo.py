@@ -65,7 +65,7 @@ async def provision_demo(service, scenarios, *, address: str, confirmed: bool, c
     scenario = scenarios.create(
         snapshot,
         workspace_id=DEMO_WORKSPACE_ID,
-        user_intent="Place a conceptual 100 MW data center with a 10 m minimum setback.",
+        user_intent="Place a conceptual 100 MW phase-1 campus with a 300 MW expansion target and a 10 m minimum setback.",
         scene_state=proposal["scene_state"],
         model_id="deterministic_demo_bootstrap",
     )

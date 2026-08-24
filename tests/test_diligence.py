@@ -1,12 +1,13 @@
 import asyncio
 import copy
 import json
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main
-from app.diligence import DiligenceService, UserSuppliedCandidateProvider, compile_project_request
+from app.diligence import CONSTRAINT_CAPABILITIES, DiligenceError, DiligenceService, UserSuppliedCandidateProvider, compile_project_request
 from app.mireye_client import MireyeClient
 from app.sandbox import ConfirmationRequired, SITE_SNAPSHOT_FIELDS, SITE_SNAPSHOT_FIELD_SCOPES, SiteSnapshotService
 from app.sandbox_agent import DILIGENCE_TOOL_DEFINITIONS, TOOL_DEFINITIONS, ModelReply, SandboxAgent
@@ -366,3 +367,417 @@ def test_diligence_http_flow_uses_service_and_preserves_approval(monkeypatch, di
     assert completed.status_code == 200
     assert completed.json()["status"] == "EVALUATED"
     assert http.get(f"/v1/diligence/projects/{project_id}/candidates").json()["total"] == 1
+
+
+def test_threshold_free_request_requires_clarification_before_ranking(diligence):
+    service, client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-clarify",
+        message="Compare sites on land size, flood exposure, wetlands, terrain, transmission proximity, road proximity, and zoning.",
+        candidates=["First Site"],
+    )
+
+    planned = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+
+    assert planned["status"] == "NEEDS_USER_DECISION"
+    assert planned["decision"]["status"] == "NO_DECISION_YET"
+    assert planned["ranking"] == []
+    assert planned["request"]["requirement_gaps"]
+    assert planned["active_decision"] is None
+    assert client.lookup_calls == client.quote_calls == []
+
+    defaulted = compile_project_request("Compare transmission proximity and road proximity using reasonable defaults.")
+    assert defaulted["requirement_status"] == "REVIEW_REQUIRED"
+    assert defaulted["assumptions_permitted"] is True
+
+
+def test_all_unresolved_candidates_return_no_decision_and_no_winner(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-unresolved", message="Compare sites within 2 km of transmission.", candidates=["First Site", "Second Site"])
+    project = service.get(project["project_id"])
+    for candidate in project["candidates"]:
+        candidate.update(
+            reconciliation_status="ENRICHED",
+            evaluation={"overall_status": "UNRESOLVED", "constraint_results": [{"constraint_id": "max_resolution_point_transmission_distance_m", "outcome": "UNRESOLVED"}]},
+        )
+    service._save(project)
+
+    result = service.rank_candidates(project["project_id"])
+
+    assert result["decision"]["status"] == "NO_DECISION_YET"
+    assert "winner_candidate_id" not in result["decision"]
+    assert all(item["rank"] for item in result["ranking"])
+
+
+def test_valid_thresholded_ranking_allows_unique_fully_passing_winner(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-winner", message="Compare sites within 2 km of transmission.", candidates=["First Site", "Second Site"])
+    project = service.get(project["project_id"])
+    first, second = project["candidates"]
+    first.update(reconciliation_status="ENRICHED", evaluation={"overall_status": "PASS", "constraint_results": [{"constraint_id": "max_resolution_point_transmission_distance_m", "outcome": "PASS"}]})
+    second.update(reconciliation_status="ENRICHED", evaluation={"overall_status": "FAIL", "constraint_results": [{"constraint_id": "max_resolution_point_transmission_distance_m", "outcome": "FAIL"}]})
+    service._save(project)
+
+    result = service.rank_candidates(project["project_id"])
+
+    assert result["decision"] == {
+        "status": "DECISION_READY", "winner_candidate_id": first["candidate_id"],
+        "reason": "This is the unique fully passing candidate under the explicit requirements.",
+    }
+
+
+def test_material_canonical_address_mismatch_requires_confirmation(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-address", message="Compare 20-50 acre sites.", candidates=["100 Main Street, Austin, TX"])
+    quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    candidate = completed["candidates"][0]
+
+    assert candidate["reconciliation_status"] == "ADDRESS_CONFIRMATION_REQUIRED"
+    assert candidate["address_reconciliation"] == {
+        "submitted_address": "100 Main Street, Austin, TX", "canonical_address": "32 Test Road", "status": "CONFIRMATION_REQUIRED",
+    }
+    with pytest.raises(DiligenceError, match="address mismatch confirmed"):
+        service.open_candidate(project["project_id"], candidate["candidate_id"])
+
+    confirmed = service.confirm_canonical_address(project["project_id"], candidate["candidate_id"], confirmed=True)
+    assert confirmed["candidates"][0]["reconciliation_status"] == "ENRICHED"
+    assert confirmed["candidates"][0]["address_reconciliation"]["status"] == "CONFIRMED"
+
+
+def test_failed_batch_never_escalates_above_configured_size(diligence):
+    service, client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-batch",
+        message="Compare 20-50 acre sites.",
+        candidates=[{"lat": 32.0 + index / 1000, "lng": -97.0} for index in range(3)],
+    )
+    batch_sizes = []
+
+    async def fail_batch(*, locations, fields, preset=None):
+        batch_sizes.append(len(locations))
+        raise RuntimeError("provider batch failure")
+
+    client.fetch_batch = fail_batch
+    quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+
+    assert quoted["spend_plan"]["batch_strategy"] == {"max_batch_size": 2, "batch_count": 2}
+    assert batch_sizes == [2, 1]
+    assert all(candidate["reconciliation_status"] == "ENRICHMENT_FAILED" for candidate in completed["candidates"])
+
+
+def requirement_value(constraint_id, **values):
+    return {"constraint_id": constraint_id, **values}
+
+
+def number_decision(question, *, target="max_resolution_point_transmission_distance_m", field="max_distance_m", unit="m"):
+    return {
+        "kind": "clarification", "question": question, "context": "A numeric limit is needed for deterministic comparison.",
+        "why_it_matters": "Without a limit, proximity cannot produce a deterministic outcome.", "risk_level": "MEDIUM",
+        "blocking": False, "input_mode": "number", "options": [], "recommended_option_id": None,
+        "allow_custom": True, "custom_schema": {"constraint_id": target, "fields": [{
+            "name": field, "label": "Maximum distance", "type": "number", "unit": unit, "minimum": 0, "maximum": 10_000_000,
+        }]}, "constraint_targets": [target],
+    }
+
+
+def choice_decision(question):
+    return {
+        "kind": "clarification", "question": question, "context": "Available evidence has different spatial scopes.",
+        "why_it_matters": "The selected scope controls what the evaluator can prove.", "risk_level": "MEDIUM",
+        "blocking": False, "input_mode": "single_choice", "options": [
+            {"id": "point", "label": "Use the point signal", "description": "Evaluate only the resolved point.", "value": requirement_value("resolution_point_outside_fema_sfha"), "consequence": "This does not prove the whole parcel."},
+            {"id": "parcel", "label": "Keep parcel-wide proof", "description": "Retain the stronger requested scope.", "value": requirement_value("parcel_outside_fema_sfha"), "consequence": "The result will remain unresolved with current evidence."},
+        ], "recommended_option_id": "point", "allow_custom": False, "custom_schema": None,
+        "constraint_targets": ["resolution_point_outside_fema_sfha", "parcel_outside_fema_sfha"],
+    }
+
+
+def text_decision(question):
+    return {
+        "kind": "clarification", "question": question, "context": "Only explicit raw zoning codes can be compared.",
+        "why_it_matters": "The evaluator cannot infer industrial use from an unmapped code.", "risk_level": "MEDIUM",
+        "blocking": False, "input_mode": "text", "options": [], "recommended_option_id": None,
+        "allow_custom": True, "custom_schema": {"constraint_id": "parcel_zoning_code_in", "fields": [{
+            "name": "allowed_codes", "label": "Allowed raw zoning codes", "type": "string_list", "unit": None, "minimum": None, "maximum": None,
+        }]}, "constraint_targets": ["parcel_zoning_code_in"],
+    }
+
+
+def ask_model(service, project, decision):
+    project_id = project["project_id"]
+    model = ScriptedModel([
+        tool("compile_project_request", {"project_id": project_id}, "compile"),
+        tool("request_user_decision", {"project_id": project_id, "mode": "ASK_USER", "decision_request": decision, "assumptions": None}, "ask"),
+    ])
+    return run(SandboxAgent(model=model, diligence=service).chat_project(project_id, "session", "Continue safely."))
+
+
+def test_dynamic_decision_same_capability_allows_context_specific_questions(diligence):
+    service, _client, _store = diligence
+    first = service.create_project(workspace_id="workspace-context-a", message="Compare sites close to transmission for an initial phase.", candidates=["First Site"])
+    second = service.create_project(workspace_id="workspace-context-b", message="Compare sites close to transmission with room for expansion.", candidates=["Second Site"])
+
+    first_response = ask_model(service, first, number_decision("What transmission distance should qualify for the initial phase?"))
+    second_response = ask_model(service, second, number_decision("How far may an expansion site be from transmission?"))
+
+    assert first_response["project"]["active_decision"]["question"] != second_response["project"]["active_decision"]["question"]
+    assert first_response["project"]["active_decision"]["constraint_targets"] == second_response["project"]["active_decision"]["constraint_targets"]
+
+
+def test_dynamic_decision_model_selects_number_choice_and_text_modes(diligence):
+    service, _client, _store = diligence
+    transmission = service.create_project(workspace_id="workspace-mode-number", message="Compare sites close to transmission.", candidates=["First Site"])
+    flood = service.create_project(workspace_id="workspace-mode-choice", message="Compare sites on flood risk.", candidates=["First Site"])
+    zoning = service.create_project(workspace_id="workspace-mode-text", message="Compare sites by zoning.", candidates=["First Site"])
+
+    decisions = [
+        ask_model(service, transmission, number_decision("What distance should I use?"))["project"]["active_decision"],
+        ask_model(service, flood, choice_decision("Which flood evidence scope should I apply?"))["project"]["active_decision"],
+        ask_model(service, zoning, text_decision("Which raw zoning codes should qualify?"))["project"]["active_decision"],
+    ]
+
+    assert [item["input_mode"] for item in decisions] == ["number", "single_choice", "text"]
+
+
+def test_dynamic_decision_generated_options_are_schema_validated(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-options", message="Compare sites on flood risk.", candidates=["First Site"])
+
+    decision = ask_model(service, project, choice_decision("Which scope fits this screening pass?"))["project"]["active_decision"]
+
+    assert {item["value"]["constraint_id"] for item in decision["options"]} == {
+        "resolution_point_outside_fema_sfha", "parcel_outside_fema_sfha",
+    }
+    assert decision["recommended_option_id"] in {item["id"] for item in decision["options"]}
+
+
+def test_dynamic_decision_invalid_generated_schema_is_rejected(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-invalid", message="Compare sites close to transmission.", candidates=["First Site"])
+    invalid = number_decision("What distance should qualify?", unit="km")
+
+    with pytest.raises(DiligenceError, match="type or unit"):
+        service.agent_decision(project["project_id"], mode="ASK_USER", decision_request=invalid)
+
+    assert service.get(project["project_id"])["active_decision"] is None
+
+
+def test_dynamic_decision_resumes_same_project(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-resume", message="Compare sites on flood risk.", candidates=["First Site"])
+    candidate_ids = [item["candidate_id"] for item in project["candidates"]]
+    decision = ask_model(service, project, choice_decision("Which evidence scope should drive this pass?"))["project"]["active_decision"]
+
+    resumed = run(service.answer_decision(
+        project["project_id"], decision["decision_id"], resume_token=decision["resume_token"], option_id="point",
+    ))
+
+    assert resumed["project_id"] == project["project_id"]
+    assert [item["candidate_id"] for item in resumed["candidates"]] == candidate_ids
+    assert resumed["agent_state"]["resume_count"] == 1
+    assert resumed["active_decision"] is None
+
+
+def test_dynamic_decision_user_answer_becomes_typed_constraint(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-typed", message="Compare sites close to transmission.", candidates=["First Site"])
+    decision = ask_model(service, project, number_decision("What maximum distance should qualify?"))["project"]["active_decision"]
+
+    resumed = run(service.answer_decision(
+        project["project_id"], decision["decision_id"], resume_token=decision["resume_token"], value=2750.0,
+    ))
+
+    assert {"constraint_id": "max_resolution_point_transmission_distance_m", "max_distance_m": 2750.0} in resumed["request"]["constraints"]
+    assert resumed["request"]["decisions"][-1]["source"] == "USER"
+
+
+def test_dynamic_decision_free_text_is_model_interpreted_then_validated(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(workspace_id="workspace-text-answer", message="Compare sites by zoning.", candidates=["First Site"])
+    decision = ask_model(service, project, text_decision("Which raw zoning codes should qualify?"))["project"]["active_decision"]
+    interpreter = ScriptedModel([tool(
+        "submit_decision_answer", {"constraint": requirement_value("parcel_zoning_code_in", allowed_codes=["I-2", "M-1"])}, "submit",
+    )])
+
+    resumed = run(SandboxAgent(model=interpreter, diligence=service).interpret_project_decision_answer(
+        project["project_id"], decision["decision_id"], resume_token=decision["resume_token"], text="Use I-2 and M-1.",
+    ))
+
+    assert {"constraint_id": "parcel_zoning_code_in", "allowed_codes": ["I-2", "M-1"]} in resumed["request"]["constraints"]
+
+
+def test_dynamic_decision_resume_does_not_repeat_mireye_work(diligence):
+    service, client, _store = diligence
+    project = service.create_project(workspace_id="workspace-once", message="Compare sites within 2 km of transmission.", candidates=["First Site"])
+    quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+    decision = quoted["active_decision"]
+    prior = (len(client.lookup_calls), len(client.quote_calls))
+
+    completed = run(service.answer_decision(
+        project["project_id"], decision["decision_id"], resume_token=decision["resume_token"], option_id="continue",
+    ))
+
+    assert (len(client.lookup_calls), len(client.quote_calls)) == prior
+    assert len(client.batch_calls) == 1
+    assert completed["spend_plan"]["status"] == "COMPLETED"
+
+
+def test_dynamic_decision_low_risk_assumption_has_provenance(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-assumption", message="Compare sites close to transmission using reasonable assumptions.", candidates=["First Site"],
+    )
+    assumptions = [{
+        "assumption": "Use a project-specific transmission screening radius.", "reason": "The user authorized a reasonable screening assumption.",
+        "confidence": "MEDIUM", "overridable": True,
+        "constraint": requirement_value("max_resolution_point_transmission_distance_m", max_distance_m=3200.0),
+    }]
+
+    result = service.agent_decision(project["project_id"], mode="ASSUME_AND_CONTINUE", assumptions=assumptions)
+
+    assert result["assumptions"][0]["source"] == "AGENT_ASSUMPTION"
+    assert result["assumptions"][0]["authorized_by"] == "USER_REQUEST"
+    assert result["assumptions"][0]["constraint"]["max_distance_m"] == 3200.0
+
+
+def test_dynamic_decision_hard_blocks_remain_application_controlled(diligence):
+    service, client, _store = diligence
+    ambiguous = service.create_project(workspace_id="workspace-no-hardblock", message="Compare sites on flood risk.", candidates=["First Site"])
+    with pytest.raises(DiligenceError, match="Only the application"):
+        service.agent_decision(ambiguous["project_id"], mode="HARD_BLOCK", decision_request=choice_decision("Confirm this?"))
+
+    quoted_project = service.create_project(workspace_id="workspace-cost-block", message="Compare sites within 2 km of transmission.", candidates=["First Site"])
+    quoted = run(service.resolve_and_quote(quoted_project["project_id"], confirmed_resolution=True))
+    with pytest.raises(ConfirmationRequired, match="answered cost DecisionRequest"):
+        run(service.confirm_and_fetch(quoted_project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    assert client.batch_calls == []
+
+
+def test_dynamic_decision_no_hardcoded_question_dictionary_remains():
+    source = (Path(__file__).parents[1] / "app" / "diligence.py").read_text(encoding="utf-8")
+
+    assert "REQUIREMENT_DECISIONS" not in source
+    assert "CLARIFICATION_QUESTIONS" not in source
+    assert all("question" not in capability for capability in CONSTRAINT_CAPABILITIES.values())
+
+
+def test_dynamic_decision_capabilities_have_no_fixed_conversation_options():
+    forbidden = {"options", "recommended_option", "recommended_option_id", "question", "context", "why_it_matters"}
+
+    assert all(forbidden.isdisjoint(capability) for capability in CONSTRAINT_CAPABILITIES.values())
+    assert all("default" not in key for capability in CONSTRAINT_CAPABILITIES.values() for key in capability)
+
+
+def test_dynamic_decision_persistence_survives_project_reload(diligence):
+    service, _client, store = diligence
+    project = service.create_project(workspace_id="workspace-reload", message="Compare sites close to transmission.", candidates=["First Site"])
+    decision = ask_model(service, project, number_decision("What limit should this project use?"))["project"]["active_decision"]
+
+    reloaded = DiligenceService(store, service.sandbox, FakeWorlds()).get(project["project_id"])
+    frontend = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert reloaded["active_decision"] == decision
+    assert "mireye-active-project-id" in frontend
+    assert "/v1/diligence/projects/" in frontend
+
+
+def test_candidate_resolution_ux_maps_each_candidate_status_and_reason(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-resolution-statuses", message="Compare sites within 2 km of transmission.",
+        candidates=["Exact", "Confirm", "Ambiguous", "Missing", "Failed"],
+    )
+    project = service.get(project["project_id"])
+    project["candidates"][0]["reconciliation_status"] = "RESOLVED"
+    project["candidates"][1].update(
+        reconciliation_status="ADDRESS_CONFIRMATION_REQUIRED",
+        address_reconciliation={"submitted_address": "100 Main St", "canonical_address": "200 Main St", "parcel_id": "parcel-1", "match_type": "exact_intersect", "match_distance_m": 0.0},
+    )
+    project["candidates"][2].update(reconciliation_status="AMBIGUOUS", resolution_options=[])
+    project["candidates"][3]["reconciliation_status"] = "NOT_FOUND"
+    project["candidates"][4]["reconciliation_status"] = "ERROR"
+
+    view = service._save(project)["candidate_resolution"]
+
+    assert [item["status"] for item in view["items"]] == ["EXACT_MATCH", "NEEDS_CONFIRMATION", "AMBIGUOUS", "UNRESOLVED", "FAILED"]
+    assert [item["reason"] for item in view["items"][1:]] == [
+        "MIREYE returned a different canonical parcel address.", "Multiple parcel candidates were returned.",
+        "No exact parcel match was found.", "MIREYE request failed.",
+    ]
+    assert view["items"][1]["details"]["parcel_id"] == "parcel-1"
+
+
+def test_candidate_resolution_ux_partial_success_continues_to_quote(diligence):
+    service, client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-partial-resolution", message="Compare sites within 2 km of transmission.",
+        candidates=["First Site", "Ambiguous Site"],
+    )
+
+    quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+
+    assert quoted["spend_plan"]["candidate_count"] == 1
+    assert len(client.quote_calls) == 1
+    assert [item["status"] for item in quoted["candidate_resolution"]["items"]] == ["EXACT_MATCH", "AMBIGUOUS"]
+    assert quoted["candidate_resolution"]["exact_count"] == 1
+
+
+def test_candidate_resolution_ux_ambiguous_choice_requires_explicit_selection(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-ambiguous-choice", message="Compare sites within 2 km of transmission.", candidates=["Ambiguous Site"],
+    )
+    project = service.get(project["project_id"])
+    project["candidates"][0].update(reconciliation_status="AMBIGUOUS", resolution_options=[
+        {"address": "101 Alpha Rd", "parcel_id": "parcel-a", "lat": 32.0, "lng": -97.0, "parcel_match_distance_m": 0.0},
+        {"address": "202 Beta Rd", "parcel_id": "parcel-b", "lat": 32.1, "lng": -97.1, "parcel_match_distance_m": 12.0},
+    ])
+    saved = service._save(project)
+
+    choices = saved["candidate_resolution"]["items"][0]["choices"]
+    assert saved["candidates"][0]["selected_location"] is None
+    assert choices[1] == {"index": 1, "address": "202 Beta Rd", "parcel_id": "parcel-b", "lat": 32.1, "lng": -97.1, "match_distance_m": 12.0}
+
+    selected = run(service.select_resolution(project["project_id"], project["candidates"][0]["candidate_id"], 1))
+    assert selected["candidates"][0]["selected_location"]["parcel_id"] == "parcel-b"
+
+
+def test_candidate_resolution_ux_canonical_mismatch_details_and_reject(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-canonical-resolution", message="Compare 20-50 acre sites.", candidates=["100 Main Street, Austin, TX"],
+    )
+    quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+    cost = quoted["active_decision"]
+    mismatch = run(service.answer_decision(
+        project["project_id"], cost["decision_id"], resume_token=cost["resume_token"], option_id="continue",
+    ))
+    item = mismatch["candidate_resolution"]["items"][0]
+
+    assert item["status"] == "NEEDS_CONFIRMATION"
+    assert item["details"] == {
+        "submitted_address": "100 Main Street, Austin, TX", "canonical_address": "32 Test Road",
+        "parcel_id": "parcel-32", "match_type": "exact_intersect", "match_distance_m": 0.0,
+        "status": "CONFIRMATION_REQUIRED",
+    }
+
+    decision = mismatch["active_decision"]
+    rejected = run(service.answer_decision(
+        project["project_id"], decision["decision_id"], resume_token=decision["resume_token"], option_id="reject",
+    ))
+    assert rejected["status"] != "CANCELLED"
+    assert rejected["candidate_resolution"]["items"][0]["status"] == "UNRESOLVED"
+
+
+def test_candidate_resolution_ux_frontend_is_specific_and_actionable():
+    root = Path(__file__).parents[1]
+    markup = (root / "app" / "static" / "index.html").read_text(encoding="utf-8")
+    script = (root / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert 'id="candidateResolution"' in markup
+    assert "Confirm this parcel" in script
+    assert "data-option-index" in script
+    assert "Submitted address" in script and "MIREYE canonical address" in script
+    assert "Candidate resolution needs attention" not in script

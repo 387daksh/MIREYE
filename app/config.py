@@ -10,6 +10,7 @@ MIREYE_BASE_URL = os.environ.get("MIREYE_BASE_URL", "https://api.mireye.com")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 SANDBOX_AGENT_MODEL = os.environ.get("SANDBOX_AGENT_MODEL", "gpt-5.6-sol")
 SANDBOX_AGENT_REASONING_EFFORT = os.environ.get("SANDBOX_AGENT_REASONING_EFFORT", "high")
+MIREYE_ENRICHMENT_BATCH_SIZE = int(os.environ.get("MIREYE_ENRICHMENT_BATCH_SIZE", "2"))
 
 
 DATA_MODE = "live" if MIREYE_API_KEY else "local"

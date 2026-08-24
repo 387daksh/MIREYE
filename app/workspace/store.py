@@ -652,6 +652,13 @@ class WorkspaceStore:
             ).fetchone()
         return json.loads(row["snapshot_json"]) if row else None
 
+    def list_world_snapshots(self) -> list[dict]:
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                "SELECT snapshot_json FROM world_snapshots ORDER BY created_at DESC"
+            ).fetchall()
+        return [json.loads(row["snapshot_json"]) for row in rows]
+
     @staticmethod
     def _scenario_row(row: sqlite3.Row) -> dict:
         return {

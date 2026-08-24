@@ -172,7 +172,7 @@ class SandboxScenarioCreateRequest(BaseModel):
 class WorldSnapshotCreateRequest(BaseModel):
     site_snapshot_id: str
     aoi_buffer_m: float = Field(default=1000, ge=100, le=5000)
-    requested_layers: list[Literal["terrain", "roads", "transmission"]] = Field(default_factory=lambda: ["terrain", "roads"])
+    requested_layers: list[Literal["terrain", "roads", "buildings", "water", "land_cover", "transmission"]] = Field(default_factory=lambda: ["terrain", "roads"])
     prefer_1m: bool = True
     overture_release: str = "2026-08-19.0"
 
@@ -240,6 +240,15 @@ class DiligenceChatRequest(BaseModel):
     confirmed_enrichment_plan_id: str | None = None
     confirmed_refresh_plan_id: str | None = None
     confirmed_ask_candidate_id: str | None = None
+
+
+class AgentDecisionAnswerRequest(BaseModel):
+    resume_token: str = Field(min_length=1, max_length=128)
+    option_id: str | None = Field(default=None, max_length=128)
+    option_ids: list[str] | None = None
+    value: Any = None
+    text: str | None = Field(default=None, max_length=4000)
+    cancelled: bool = False
 
 
 # -----------------------------------------------------------------------------
@@ -328,6 +337,21 @@ async def select_diligence_candidate_resolution(project_id: str, candidate_id: s
     try:
         return await diligence_service.select_resolution(project_id, candidate_id, req.option_index)
     except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/decisions/{decision_id}/answer")
+async def answer_diligence_decision(project_id: str, decision_id: str, req: AgentDecisionAnswerRequest):
+    try:
+        if req.text is not None and not req.cancelled:
+            return await sandbox_agent.interpret_project_decision_answer(
+                project_id, decision_id, resume_token=req.resume_token, text=req.text,
+            )
+        return await diligence_service.answer_decision(
+            project_id, decision_id, resume_token=req.resume_token, option_id=req.option_id,
+            option_ids=req.option_ids, value=req.value, cancelled=req.cancelled,
+        )
+    except (DiligenceError, ConfirmationRequired, SandboxError, ToolValidationError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -490,10 +514,23 @@ async def get_sandbox_freshness(snapshot_id: str):
         raise HTTPException(status_code=404 if str(exc) == "SiteSnapshot not found." else 400, detail=str(exc)) from exc
 
 
-@app.post("/v1/sandbox/site/{snapshot_id}/refresh/quote")
-async def quote_sandbox_refresh(snapshot_id: str):
+@app.get("/v1/sandbox/site/{snapshot_id}/intelligence-plan")
+async def get_sandbox_intelligence_plan(snapshot_id: str):
     try:
-        return await sandbox_service.quote_refresh(snapshot_id)
+        return await sandbox_service.project_intelligence_plan(snapshot_id)
+    except MireyeUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except SandboxError as exc:
+        raise HTTPException(status_code=404 if str(exc) == "SiteSnapshot not found." else 400, detail=str(exc)) from exc
+
+
+@app.post("/v1/sandbox/site/{snapshot_id}/refresh/quote")
+async def quote_sandbox_refresh(
+    snapshot_id: str,
+    profile: Literal["data_center_siting"] | None = Query(default=None),
+):
+    try:
+        return await sandbox_service.quote_refresh(snapshot_id, project_profile=profile)
     except MireyeUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SandboxError as exc:
@@ -601,6 +638,17 @@ async def get_world_roads(world_snapshot_id: str):
         raise HTTPException(status_code=404, detail="WorldSnapshot not found.")
     try:
         return FileResponse(world_service.road_artifact(snapshot), media_type="application/geo+json")
+    except WorldError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/sandbox/world-snapshots/{world_snapshot_id}/layers/{layer_name}")
+async def get_world_vector_layer(world_snapshot_id: str, layer_name: str):
+    snapshot = world_service.get(world_snapshot_id)
+    if snapshot is None:
+        raise HTTPException(status_code=404, detail="WorldSnapshot not found.")
+    try:
+        return FileResponse(world_service.vector_artifact(snapshot, layer_name), media_type="application/geo+json")
     except WorldError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

@@ -1,12 +1,12 @@
 """Deterministic parcel-derived placement for conceptual sandbox proposals.
 
-Strategy ``parcel_inset_grid_v1``:
+Strategy ``parcel_inset_campus_v2``:
 1. Project the authoritative parcel into the scene's local-meter frame.
 2. Inset it by the requested minimum setback.
 3. Try the requested rotation, or deterministic parcel-aligned orientations.
 4. Test central points followed by a stable 21x21 grid.
-5. If dimensions were omitted, uniformly scale the 250x350 m conceptual
-   default from 100% to 25%; explicit dimensions are never reduced.
+5. If dimensions were omitted, uniformly scale the deterministic 300 MW
+   planning envelope from 100% to 25%; explicit dimensions are never reduced.
 6. Accept a candidate only after the unchanged deterministic evaluator passes
    containment and setback.
 """
@@ -18,7 +18,7 @@ from typing import Any
 
 from shapely.geometry import MultiPolygon, Polygon
 
-from app.sandbox import scene_state_from_snapshot
+from app.sandbox import SandboxError, conceptual_data_center_campus
 from app.sandbox_evaluator import (
     SceneValidationError,
     _geometry_evidence_issue,
@@ -28,10 +28,13 @@ from app.sandbox_evaluator import (
 )
 
 
-PLACEMENT_STRATEGY = "parcel_inset_grid_v1"
-DEFAULT_WIDTH_M = 250.0
-DEFAULT_LENGTH_M = 350.0
-DEFAULT_HEIGHT_M = 28.0
+PLACEMENT_STRATEGY = "parcel_inset_campus_v2"
+DEFAULT_EXPANSION_TARGET_MW = 300.0
+DEFAULT_LAND_ENVELOPE_M2_PER_MW = 750.0
+DEFAULT_CAMPUS_ASPECT_RATIO = 4 / 3
+DEFAULT_WIDTH_M = round(math.sqrt(DEFAULT_EXPANSION_TARGET_MW * DEFAULT_LAND_ENVELOPE_M2_PER_MW / DEFAULT_CAMPUS_ASPECT_RATIO), 3)
+DEFAULT_LENGTH_M = round(DEFAULT_WIDTH_M * DEFAULT_CAMPUS_ASPECT_RATIO, 3)
+DEFAULT_HEIGHT_M = 24.0
 DEFAULT_MINIMUM_SETBACK_M = 10.0
 MINIMUM_DEFAULT_SCALE = 0.25
 GRID_STEPS = 20
@@ -111,6 +114,7 @@ def generate_data_center_proposal(
     position: dict | None = None,
     rotation_deg: Any = None,
     minimum_setback_m: Any = None,
+    elements: list[str] | None = None,
 ) -> dict:
     """Return a validated candidate scene or an explicit unresolved/impossible result."""
     evidence_issue = _geometry_evidence_issue(snapshot)
@@ -143,21 +147,24 @@ def generate_data_center_proposal(
         }
 
     dimensions_explicit = width_m is not None or length_m is not None
-    template = scene_state_from_snapshot(snapshot)["proposed"][0]
     centers = _candidate_centers(feasible_region, explicit_position)
     for scale in _scales(dimensions_explicit):
         placed_width, placed_length = round(width * scale, 6), round(length * scale, 6)
         for angle in _orientations(feasible_region, rotation):
             for center in centers:
-                candidate = copy.deepcopy(template)
-                candidate["geometry_local"].update({
-                    "center_xy_m": center,
-                    "width_m": placed_width,
-                    "length_m": placed_length,
-                    "height_m": height,
-                    "rotation_deg": angle,
-                })
-                candidate["attributes"]["capacity_mw"] = capacity
+                try:
+                    candidate = conceptual_data_center_campus(
+                        center_xy_m=center,
+                        width_m=placed_width,
+                        length_m=placed_length,
+                        height_m=height,
+                        rotation_deg=angle,
+                        capacity_mw=capacity,
+                        expansion_target_mw=max(DEFAULT_EXPANSION_TARGET_MW, capacity),
+                        elements=elements,
+                    )
+                except SandboxError as exc:
+                    raise SceneValidationError(str(exc)) from exc
                 if not feasible_region.covers(build_oriented_footprint(candidate)):
                     continue
                 candidate_scene = copy.deepcopy(scene_state)

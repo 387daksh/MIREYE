@@ -15,9 +15,11 @@
   const propertyHandoffInput = document.getElementById("propertyHandoffInput");
   const projectPanel = document.getElementById("projectPanel");
   const projectAgent = document.getElementById("projectAgent");
+  const agentDecision = document.getElementById("agentDecision");
+  const candidateResolution = document.getElementById("candidateResolution");
   let activeMessage = "";
   let activeProjectId = null;
-  let activeProjectSpendPlan = null;
+  let activeProjectDecision = null;
   const projectAgentSessionId = `diligence-${crypto.randomUUID()}`;
 
   const statusLabel = {
@@ -34,6 +36,8 @@
     propertyHandoff.hidden = true;
     projectPanel.hidden = true;
     projectAgent.hidden = true;
+    agentDecision.hidden = true;
+    candidateResolution.hidden = true;
     document.getElementById("requestSummary").hidden = true;
     renderStages([
       { id: "understand", label: "Understanding request", status: "active" },
@@ -130,7 +134,7 @@
 
   function renderResponse(payload) {
     activeProjectId = null;
-    activeProjectSpendPlan = null;
+    activeProjectDecision = null;
     activeRequestId = payload.request_id;
     renderUnderstanding(payload.understanding || []);
     renderStages(payload.stages || []);
@@ -141,6 +145,8 @@
     propertyHandoff.hidden = true;
     projectPanel.hidden = true;
     projectAgent.hidden = true;
+    agentDecision.hidden = true;
+    candidateResolution.hidden = true;
     if (payload.status === "DISCOVERY_UNAVAILABLE") {
       showNotice("Start with a specific property", payload.message, "warning");
       propertyHandoff.hidden = false;
@@ -165,6 +171,13 @@
     return payload;
   }
 
+  async function get(url) {
+    const response = await fetch(url);
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : "Mireye couldn't load that project.");
+    return payload;
+  }
+
   async function submitRequest(event) {
     event.preventDefault();
     if (!input.value.trim()) return;
@@ -177,7 +190,10 @@
       if (candidates.length) {
         const workspaceId = sessionStorage.getItem("mireye-workspace-id") || `workspace-${crypto.randomUUID()}`;
         sessionStorage.setItem("mireye-workspace-id", workspaceId);
-        renderDiligenceProject(await post("/v1/diligence/projects", { workspace_id: workspaceId, message: input.value.trim(), candidates }));
+        const project = await post("/v1/diligence/projects", { workspace_id: workspaceId, message: input.value.trim(), candidates });
+        sessionStorage.setItem("mireye-active-project-id", project.project_id);
+        renderDiligenceProject(project);
+        await continueDiligenceAgent("Review the request, resolve only necessary ambiguity, and continue safely.");
       } else {
         renderResponse(await post("/v1/product/requests", { message: input.value.trim() }));
       }
@@ -190,8 +206,10 @@
   }
 
   function renderDiligenceProject(project) {
+    work.hidden = false;
     activeProjectId = project.project_id;
-    activeProjectSpendPlan = project.spend_plan;
+    sessionStorage.setItem("mireye-active-project-id", project.project_id);
+    activeProjectDecision = project.active_decision || null;
     renderUnderstanding(project.request.understanding || []);
     notice.hidden = true;
     choices.hidden = true;
@@ -200,8 +218,23 @@
     projectAgent.hidden = true;
     confirmation.hidden = true;
     results.hidden = true;
+    agentDecision.hidden = true;
+    candidateResolution.hidden = true;
     const resolved = project.candidates.filter((item) => ["RESOLVED", "ENRICHED"].includes(item.reconciliation_status)).length;
-    if (project.status === "CANDIDATES_SUPPLIED") {
+    renderCandidateResolution(project);
+    if (activeProjectDecision) {
+      renderStages([
+        { id: "understand", label: "Understanding request", status: activeProjectDecision.originating_step === "requirement_compilation" ? "needs_input" : "complete" },
+        { id: "discover", label: "Resolving supplied candidates", status: activeProjectDecision.originating_step === "candidate_identity" ? "needs_input" : resolved ? "complete" : "pending" },
+        { id: "enrich", label: "Checking MIREYE site intelligence", status: activeProjectDecision.originating_step === "mireye_enrichment" ? "needs_input" : "pending" },
+        { id: "evaluate", label: "Evaluating constraints", status: "pending" },
+      ]);
+      if (activeProjectDecision.originating_step === "candidate_identity") {
+        showNotice("Please confirm one property", "MIREYE found the parcel, but its canonical address differs from what you supplied.", "warning");
+      } else {
+        renderAgentDecision(activeProjectDecision);
+      }
+    } else if (project.status === "CANDIDATES_SUPPLIED") {
       renderStages([
         { id: "understand", label: "Understanding request", status: "complete" },
         { id: "discover", label: "Resolving supplied candidates", status: "confirmation_required" },
@@ -222,7 +255,7 @@
       document.getElementById("confirmationText").textContent = `${resolved} resolved candidate${resolved === 1 ? "" : "s"}. ${project.spend_plan.requested_fields.length} required fields will be checked. ${credits}.`;
       document.getElementById("confirmButton").textContent = "Approve MIREYE enrichment";
       confirmation.hidden = false;
-    } else if (project.status === "EVALUATED") {
+    } else if (["EVALUATED", "NO_DECISION_YET"].includes(project.status)) {
       renderStages([
         { id: "understand", label: "Understanding request", status: "complete" },
         { id: "discover", label: "Resolving supplied candidates", status: "complete" },
@@ -241,9 +274,198 @@
         };
       }));
       projectAgent.hidden = false;
-      showNotice("MIREYE shortlist ready", `${project.ranking.length} supplied candidates were ranked from deterministic evidence outcomes.`, "success");
+      if (project.decision?.status === "DECISION_READY") {
+        showNotice("MIREYE shortlist ready", `${project.ranking.length} supplied candidates were ranked from deterministic evidence outcomes.`, "success");
+      } else {
+        showNotice("No decision yet", project.decision?.reason || "The current evidence does not support a winner.", "warning");
+      }
     } else {
-      showNotice("Candidate resolution needs attention", "Some supplied candidates could not be resolved automatically. Review the candidate inputs or select an explicit match.", "warning");
+      const attention = project.candidate_resolution?.attention_count || 0;
+      showNotice(
+        attention === 1 ? "I need your help with one property" : `I need your help with ${attention} properties`,
+        "I kept every confirmed match. Review only the properties below that still need a decision.", "warning",
+      );
+    }
+  }
+
+  function candidateInputLabel(value) {
+    if (typeof value === "string") return value;
+    if (value?.address) return value.address;
+    if (value?.apn) return `APN ${value.apn}`;
+    if (value?.lat != null && value?.lng != null) return `${value.lat}, ${value.lng}`;
+    return "Supplied property";
+  }
+
+  function resolutionDetail(label, value) {
+    if (value == null || value === "") return "";
+    return `<div><dt>${escapeHtml(label)}</dt><dd>${escapeHtml(value)}</dd></div>`;
+  }
+
+  function renderCandidateResolution(project) {
+    const view = project.candidate_resolution;
+    if (!view?.items?.length) return;
+    document.getElementById("candidateResolutionTitle").textContent = view.has_attention ? "A few properties need your review" : "Properties matched";
+    document.getElementById("candidateResolutionSummary").textContent = view.has_attention
+      ? `${view.exact_count} confirmed. ${view.attention_count} still need attention.`
+      : `${view.exact_count} exact parcel match${view.exact_count === 1 ? "" : "es"}.`;
+    const list = document.getElementById("candidateResolutionList");
+    list.replaceChildren(...view.items.map((item) => {
+      const card = document.createElement("article");
+      card.className = `resolution-card ${item.status.toLowerCase()}`;
+      const details = item.details || {};
+      const choices = item.choices.map((choice) => `
+        <button class="resolution-choice" type="button" data-candidate-id="${escapeHtml(item.candidate_id)}" data-option-index="${choice.index}">
+          <strong>${escapeHtml(choice.address || "Parcel candidate")}</strong>
+          <span>${escapeHtml(choice.parcel_id ? `Parcel ${choice.parcel_id}` : "Parcel ID unavailable")}</span>
+          <span>${choice.lat == null || choice.lng == null ? "Coordinates unavailable" : `${escapeHtml(choice.lat)}, ${escapeHtml(choice.lng)}`}</span>
+          <span>${choice.match_distance_m == null ? "Match distance unavailable" : `${escapeHtml(choice.match_distance_m)} m match distance`}</span>
+        </button>`).join("");
+      const canonical = item.status === "NEEDS_CONFIRMATION" ? `
+        <dl class="resolution-details">
+          ${resolutionDetail("Submitted address", details.submitted_address)}
+          ${resolutionDetail("MIREYE canonical address", details.canonical_address)}
+          ${resolutionDetail("Parcel ID", details.parcel_id)}
+          ${resolutionDetail("Match type", details.match_type)}
+          ${resolutionDetail("Match distance", details.match_distance_m == null ? null : `${details.match_distance_m} m`)}
+        </dl>
+        <div class="resolution-actions">
+          <button class="primary-button confirm-parcel" type="button" data-candidate-id="${escapeHtml(item.candidate_id)}">Confirm this parcel</button>
+          <button class="secondary-button reject-parcel" type="button" data-candidate-id="${escapeHtml(item.candidate_id)}">Reject</button>
+        </div>` : "";
+      card.innerHTML = `
+        <div class="resolution-card-heading"><strong>${escapeHtml(candidateInputLabel(item.raw_input))}</strong><span class="resolution-status">${escapeHtml(item.status)}</span></div>
+        ${item.reason ? `<p>${escapeHtml(item.reason)}</p>` : ""}
+        ${canonical}
+        ${choices ? `<div class="resolution-choices">${choices}</div>` : ""}`;
+      return card;
+    }));
+    list.querySelectorAll(".resolution-choice").forEach((button) => button.addEventListener("click", () => selectCandidateResolution(button.dataset.candidateId, Number(button.dataset.optionIndex))));
+    list.querySelectorAll(".confirm-parcel").forEach((button) => button.addEventListener("click", () => answerParcelConfirmation(button.dataset.candidateId, "confirm")));
+    list.querySelectorAll(".reject-parcel").forEach((button) => button.addEventListener("click", () => answerParcelConfirmation(button.dataset.candidateId, "reject")));
+    candidateResolution.hidden = false;
+  }
+
+  async function selectCandidateResolution(candidateId, optionIndex) {
+    try {
+      renderDiligenceProject(await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/candidates/${encodeURIComponent(candidateId)}/select`, { option_index: optionIndex }));
+    } catch (error) {
+      showNotice("I couldn't use that parcel", error.message, "warning");
+    }
+  }
+
+  async function answerParcelConfirmation(candidateId, optionId) {
+    const decision = activeProjectDecision;
+    if (!decision || decision.originating_step !== "candidate_identity" || decision.resume_action?.candidate_id !== candidateId) {
+      showNotice("Another property needs attention first", "Finish the active parcel confirmation, then continue with this property.", "warning");
+      return;
+    }
+    try {
+      renderDiligenceProject(await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/decisions/${encodeURIComponent(decision.decision_id || decision.id)}/answer`, {
+        resume_token: decision.resume_token, option_id: optionId, option_ids: null, value: null, text: null, cancelled: false,
+      }));
+    } catch (error) {
+      showNotice("I couldn't apply that parcel decision", error.message, "warning");
+    }
+  }
+
+  function renderAgentDecision(decision) {
+    document.getElementById("agentDecisionTitle").textContent = decision.question;
+    document.getElementById("agentDecisionContext").textContent = decision.context;
+    document.getElementById("agentDecisionWhy").textContent = decision.why_it_matters;
+    const options = document.getElementById("agentDecisionOptions");
+    const multi = decision.input_mode === "multi_choice";
+    options.replaceChildren(...decision.options.map((option, index) => {
+      const label = document.createElement("label");
+      label.className = "agent-decision-option";
+      const radio = document.createElement("input");
+      radio.type = multi ? "checkbox" : "radio";
+      radio.name = "agent-decision-option";
+      radio.value = option.id;
+      radio.checked = option.id === decision.recommended_option_id;
+      const copy = document.createElement("span");
+      const title = document.createElement("strong");
+      const description = document.createElement("small");
+      const consequence = document.createElement("small");
+      title.textContent = option.label;
+      description.textContent = option.description;
+      consequence.textContent = option.consequence;
+      consequence.className = "agent-decision-consequence";
+      copy.append(title, description, consequence);
+      label.append(radio, copy);
+      return label;
+    }));
+    options.hidden = !decision.options.length;
+    const custom = document.getElementById("agentDecisionCustom");
+    custom.replaceChildren();
+    if (decision.allow_custom && decision.custom_schema) {
+      decision.custom_schema.fields.forEach((field) => {
+        const label = document.createElement("label");
+        label.textContent = field.label;
+        const control = field.type === "string_list" ? document.createElement("textarea") : document.createElement("input");
+        if (control.tagName === "INPUT") control.type = field.type === "number" ? "number" : "text";
+        if (field.minimum != null) control.min = String(field.minimum);
+        if (field.maximum != null) control.max = String(field.maximum);
+        if (field.unit) control.placeholder = field.unit;
+        control.dataset.fieldName = field.name;
+        control.dataset.fieldType = field.type;
+        control.addEventListener("input", () => options.querySelectorAll("input").forEach((input) => { input.checked = false; }));
+        label.append(control);
+        custom.append(label);
+      });
+    }
+    custom.hidden = !custom.childElementCount;
+    const recommended = decision.options.find((option) => option.id === decision.recommended_option_id);
+    const recommendedCopy = document.getElementById("agentDecisionRecommended");
+    recommendedCopy.textContent = recommended ? `Recommended: ${recommended.label}` : "";
+    recommendedCopy.hidden = !recommended;
+    agentDecision.hidden = false;
+  }
+
+  async function continueDiligenceAgent(message) {
+    if (!activeProjectId || activeProjectDecision) return;
+    const response = document.getElementById("projectAgentResponse");
+    response.textContent = "Reviewing your request...";
+    try {
+      const result = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/chat`, {
+        message, session_id: projectAgentSessionId, confirmed_resolution_project_id: activeProjectId,
+      });
+      response.textContent = result.message;
+      renderDiligenceProject(result.project);
+    } catch (error) {
+      showNotice("The agent paused", error.message, "warning");
+    }
+  }
+
+  async function answerAgentDecision(cancelled = false) {
+    if (!activeProjectId || !activeProjectDecision) return;
+    const selected = [...document.querySelectorAll('input[name="agent-decision-option"]:checked')];
+    const customInputs = [...document.querySelectorAll("#agentDecisionCustom [data-field-name]")];
+    const hasCustom = customInputs.some((input) => input.value.trim() !== "");
+    if (!cancelled && !selected.length && !hasCustom) return;
+    const decision = activeProjectDecision;
+    let value = null;
+    let textAnswer = null;
+    if (hasCustom) {
+      if (decision.input_mode === "text") {
+        textAnswer = customInputs[0].value.trim();
+      } else {
+        const values = Object.fromEntries(customInputs.map((input) => {
+        let item = input.value.trim();
+        if (input.dataset.fieldType === "number") item = Number(item);
+        return [input.dataset.fieldName, item];
+        }));
+        value = decision.input_mode === "range" ? values : values[customInputs[0].dataset.fieldName];
+      }
+    }
+    const project = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/decisions/${encodeURIComponent(decision.id)}/answer`, {
+      resume_token: decision.resume_token,
+      option_id: decision.input_mode === "multi_choice" ? null : selected[0]?.value || null,
+      option_ids: decision.input_mode === "multi_choice" ? selected.map((input) => input.value) : null,
+      value, text: textAnswer, cancelled,
+    });
+    renderDiligenceProject(project);
+    if (!cancelled && project.status === "CANDIDATES_SUPPLIED") {
+      await continueDiligenceAgent("Continue from the accepted decision without repeating completed work.");
     }
   }
 
@@ -273,6 +495,7 @@
     try {
       const result = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/chat`, { message, session_id: projectAgentSessionId });
       response.textContent = result.message;
+      if (result.project) renderDiligenceProject(result.project);
       field.value = "";
     } catch (error) {
       response.textContent = error.message;
@@ -326,11 +549,7 @@
       { id: "evaluate", label: "Evaluating constraints", status: "pending" },
     ]);
     try {
-      if (activeProjectId && activeProjectSpendPlan) {
-        renderDiligenceProject(await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/enrich`, { spend_plan_id: activeProjectSpendPlan.spend_plan_id, confirmed: true }));
-      } else {
-        renderResponse(await post(`/v1/product/requests/${encodeURIComponent(activeRequestId)}/confirm`, { confirmed: true }));
-      }
+      renderResponse(await post(`/v1/product/requests/${encodeURIComponent(activeRequestId)}/confirm`, { confirmed: true }));
     }
     catch (error) { showNotice("MIREYE couldn't analyze this property", `${error.message} No existing site data was changed.`, "warning"); }
     finally { button.disabled = false; button.textContent = "Continue with MIREYE"; }
@@ -349,8 +568,17 @@
   document.getElementById("checkProject").addEventListener("click", () => checkProject().catch((error) => showNotice("Freshness check failed", error.message, "warning")));
   propertyHandoffForm.addEventListener("submit", submitPropertyHandoff);
   document.getElementById("confirmButton").addEventListener("click", confirmRequest);
+  document.getElementById("agentDecisionContinue").addEventListener("click", () => answerAgentDecision(false).catch((error) => showNotice("I couldn't apply that decision", error.message, "warning")));
+  document.getElementById("agentDecisionCancel").addEventListener("click", () => answerAgentDecision(true).catch((error) => showNotice("I couldn't cancel that decision", error.message, "warning")));
   document.querySelectorAll(".prompt-examples button").forEach((button) => button.addEventListener("click", () => {
     input.value = button.textContent;
     input.focus();
   }));
+
+  const persistedProjectId = sessionStorage.getItem("mireye-active-project-id");
+  if (persistedProjectId) {
+    get(`/v1/diligence/projects/${encodeURIComponent(persistedProjectId)}`)
+      .then(renderDiligenceProject)
+      .catch(() => sessionStorage.removeItem("mireye-active-project-id"));
+  }
 })();

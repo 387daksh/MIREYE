@@ -39,7 +39,7 @@
       <div class="prompt-examples" aria-label="Example requests">
         <span>Try</span>
         <button type="button">Compare 3 sites for a 100 MW data center</button>
-        <button type="button">Diligence 1600 Pennsylvania Avenue NW, Washington, DC</button>
+        <button type="button">Diligence 1 Tesla Road, Austin, TX 78725</button>
         <button type="button">Show me what I could build at 38.8977, -77.0365</button>
         <button type="button">Find land for a solar farm</button>
       </div>
@@ -67,13 +67,35 @@
         <form class="property-handoff-form" id="propertyHandoffForm">
           <label for="propertyHandoffInput">Property address or coordinates</label>
           <div>
-            <input id="propertyHandoffInput" type="text" autocomplete="street-address" placeholder="1600 Pennsylvania Avenue NW, Washington, DC">
+            <input id="propertyHandoffInput" type="text" autocomplete="street-address" placeholder="1 Tesla Road, Austin, TX 78725">
             <button class="primary-button" type="submit">Analyze property <span aria-hidden="true">&rarr;</span></button>
           </div>
         </form>
       </section>
 
       <div class="choice-list" id="choiceList" hidden></div>
+
+      <section class="candidate-resolution" id="candidateResolution" hidden aria-labelledby="candidateResolutionTitle">
+        <div class="candidate-resolution-heading">
+          <div><p class="section-kicker">Property matching</p><h2 id="candidateResolutionTitle"></h2></div>
+          <p id="candidateResolutionSummary"></p>
+        </div>
+        <div class="candidate-resolution-list" id="candidateResolutionList"></div>
+      </section>
+
+      <section class="agent-decision" id="agentDecision" hidden aria-labelledby="agentDecisionTitle">
+        <p class="section-kicker">One thing I need from you</p>
+        <h2 id="agentDecisionTitle"></h2>
+        <p id="agentDecisionContext"></p>
+        <div class="agent-decision-options" id="agentDecisionOptions" role="radiogroup"></div>
+        <div class="agent-decision-custom" id="agentDecisionCustom"></div>
+        <p class="agent-decision-why" id="agentDecisionWhy"></p>
+        <p class="agent-decision-recommended" id="agentDecisionRecommended" hidden></p>
+        <div class="agent-decision-actions">
+          <button class="primary-button" id="agentDecisionContinue" type="button">Continue</button>
+          <button class="secondary-button" id="agentDecisionCancel" type="button">Cancel</button>
+        </div>
+      </section>
 
       <div class="project-panel" id="projectPanel" hidden>
         <div><p class="section-kicker">Customer-supplied shortlist</p><h2 id="projectTitle">Candidates ready</h2><p id="projectText"></p></div>
@@ -93,7 +115,7 @@
       <div class="results" id="results" hidden>
         <div class="results-heading">
           <div><p class="section-kicker">Verified property</p><h2>Candidate sites</h2></div>
-          <label class="sort-control">Sort <select aria-label="Sort candidates"><option>Best match</option></select></label>
+          <label class="sort-control">Sort <select aria-label="Sort candidates"><option>Deterministic order</option></select></label>
         </div>
         <div id="candidateList"></div>
         <section class="project-agent" id="projectAgent" hidden aria-labelledby="projectAgentTitle">

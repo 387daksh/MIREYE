@@ -68,6 +68,23 @@ def test_default_footprint_fits_with_parcel_derived_placement():
     assert result["scene_state"]["proposed"][0]["attributes"]["capacity_mw"] == 100
 
 
+def test_default_proposal_is_a_deterministic_semantic_campus():
+    result = propose(snapshot(800, 800))
+    campus = result["scene_state"]["proposed"][0]
+    components = {item["id"]: item for item in campus["components"]}
+
+    assert campus["kind"] == "data_center_campus"
+    assert campus["attributes"]["expansion_target_mw"] == 300
+    assert campus["assumption_profile"] == "conceptual_ai_data_center_campus_v1"
+    assert set(components) == {
+        "data_hall_a", "data_hall_b", "electrical_yard", "cooling_plant",
+        "service_parking", "internal_access", "expansion_reserve",
+    }
+    assert sum(components[item]["attributes"]["capacity_mw"] for item in ("data_hall_a", "data_hall_b")) == 100
+    assert components["expansion_reserve"]["attributes"]["capacity_mw"] == 200
+    assert result == propose(snapshot(800, 800))
+
+
 def test_default_footprint_is_uniformly_reduced_when_needed():
     result = propose(snapshot(260, 340))
 

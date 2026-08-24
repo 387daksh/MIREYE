@@ -53,6 +53,22 @@ SITE_SNAPSHOT_FIELDS = (
     "sewer_service_area_provider",
 )
 
+DATA_CENTER_SITING_PRESET = "data_center_siting"
+MIREYE_EXPLICIT_FIELD_LIMIT = 50
+DATA_CENTER_CONTEXT_FIELDS = (
+    "parcel_id", "parcel_apn", "parcel_address", "parcel_owner", "parcel_zoning",
+    "parcel_area_m2", "parcel_boundary_geojson", "parcel_data_source",
+    "parcel_match_type", "parcel_match_distance_m", "parcel_match_radius_m",
+    "elevation", "aspect_degrees", "aspect_cardinal", "soil_drainage_class",
+    "bedrock_depth_cm", "lcms_class", "land_use_class", "tree_canopy_pct",
+    "wetland_acres_on_parcel", "wetland_fraction_of_parcel",
+    "nearest_major_road_distance_m", "nearest_major_road_name",
+    "nearest_major_road_class", "roads_within_500m_count",
+    "primary_building_overture_class", "primary_building_height_m",
+    "primary_building_num_floors", "primary_building_footprint_sqm",
+    "political_region", "political_county", "political_locality", "tract_geoid",
+)
+
 SITE_SNAPSHOT_FIELD_SCOPES = {
     "parcel_area_m2": "PARCEL",
     "parcel_zoning": "PARCEL",
@@ -133,6 +149,129 @@ def _local_xy(lat: float, lng: float, origin: dict[str, float]) -> list[float]:
     return [round(x, 3), round(y, 3)]
 
 
+def conceptual_data_center_campus(
+    *,
+    center_xy_m: list[float],
+    width_m: float,
+    length_m: float,
+    height_m: float,
+    rotation_deg: float,
+    capacity_mw: float,
+    expansion_target_mw: float = 300.0,
+    elements: list[str] | None = None,
+) -> dict:
+    """Return the deterministic, conceptual campus representation used by the sandbox."""
+
+    def component(
+        component_id: str,
+        kind: str,
+        label: str,
+        *,
+        center_uv: tuple[float, float],
+        width_ratio: float,
+        length_ratio: float,
+        component_height_m: float,
+        render_class: str,
+        phase: str,
+        component_capacity_mw: float | None = None,
+    ) -> dict:
+        attributes = {"phase": phase}
+        if component_capacity_mw is not None:
+            attributes["capacity_mw"] = round(component_capacity_mw, 3)
+        return {
+            "id": component_id,
+            "kind": kind,
+            "label": label,
+            "origin": "PROPOSED",
+            "semantic_class": f"proposed_{kind}",
+            "render_class": render_class,
+            "geometry_relative": {
+                "shape": "oriented_rectangle",
+                "center_uv": [center_uv[0], center_uv[1]],
+                "width_ratio": width_ratio,
+                "length_ratio": length_ratio,
+                "height_m": component_height_m,
+                "rotation_offset_deg": 0.0,
+            },
+            "attributes": attributes,
+        }
+
+    phase_capacity = min(float(capacity_mw), float(expansion_target_mw))
+    expansion_capacity = max(0.0, float(expansion_target_mw) - phase_capacity)
+    components = [
+        component("data_hall_a", "data_hall", "Data hall A", center_uv=(-0.27, -0.08), width_ratio=0.22, length_ratio=0.42, component_height_m=height_m, render_class="building", phase="PHASE_1", component_capacity_mw=phase_capacity / 2),
+        component("data_hall_b", "data_hall", "Data hall B", center_uv=(-0.02, -0.08), width_ratio=0.22, length_ratio=0.42, component_height_m=height_m, render_class="building", phase="PHASE_1", component_capacity_mw=phase_capacity / 2),
+        component("electrical_yard", "electrical_area", "Electrical yard", center_uv=(-0.27, -0.36), width_ratio=0.22, length_ratio=0.10, component_height_m=6.0, render_class="utility", phase="PHASE_1"),
+        component("cooling_plant", "cooling_plant", "Cooling plant", center_uv=(0.18, -0.08), width_ratio=0.10, length_ratio=0.42, component_height_m=10.0, render_class="utility", phase="PHASE_1"),
+        component("service_parking", "service_parking", "Parking and service", center_uv=(-0.12, 0.25), width_ratio=0.34, length_ratio=0.16, component_height_m=0.4, render_class="surface", phase="PHASE_1"),
+        component("internal_access", "internal_access_road", "Internal access road", center_uv=(-0.46, 0.0), width_ratio=0.035, length_ratio=0.86, component_height_m=0.2, render_class="access", phase="PHASE_1"),
+        component("expansion_reserve", "expansion_reserve", "Expansion reserve", center_uv=(0.36, 0.0), width_ratio=0.20, length_ratio=0.72, component_height_m=0.2, render_class="reserve", phase="FUTURE", component_capacity_mw=expansion_capacity),
+    ]
+    element_kinds = {
+        "data_halls": {"data_hall"},
+        "electrical_area": {"electrical_area"},
+        "cooling_plant": {"cooling_plant"},
+        "internal_access": {"internal_access_road"},
+        "service_parking": {"service_parking"},
+        "expansion_reserve": {"expansion_reserve"},
+    }
+    selected = list(element_kinds) if elements is None else list(dict.fromkeys(elements))
+    invalid = set(selected) - set(element_kinds)
+    if invalid or not selected:
+        raise SandboxError(f"Unsupported conceptual campus elements: {', '.join(sorted(invalid)) or 'none'}.")
+    selected_kinds = set().union(*(element_kinds[name] for name in selected))
+    components = [item for item in components if item["kind"] in selected_kinds]
+    return {
+        "id": "data_center_1",
+        "kind": "data_center_campus",
+        "origin": "PROPOSED",
+        "semantic_class": "proposed_data_center_campus",
+        "render_class": "campus_boundary",
+        "geometry_local": {
+            "shape": "oriented_rectangle",
+            "center_xy_m": [round(float(center_xy_m[0]), 3), round(float(center_xy_m[1]), 3)],
+            "width_m": round(float(width_m), 6),
+            "length_m": round(float(length_m), 6),
+            "height_m": round(float(height_m), 6),
+            "rotation_deg": round(float(rotation_deg), 6),
+        },
+        "attributes": {
+            "capacity_mw": round(float(capacity_mw), 3),
+            "phase": "PHASE_1",
+            "expansion_target_mw": round(float(expansion_target_mw), 3),
+            "layout_strategy": "balanced_campus",
+            "planning_basis": "conceptual_land_envelope_only",
+            "selected_elements": selected,
+        },
+        "components": components,
+        "assumption_profile": "conceptual_ai_data_center_campus_v1",
+    }
+
+
+def campus_component_object(campus: dict, component: dict) -> dict:
+    """Materialize one relative campus component in the local-meter frame."""
+    parent = campus["geometry_local"]
+    relative = component["geometry_relative"]
+    radians = math.radians(float(parent["rotation_deg"]))
+    x = float(relative["center_uv"][0]) * float(parent["width_m"])
+    y = float(relative["center_uv"][1]) * float(parent["length_m"])
+    return {
+        **copy.deepcopy(component),
+        "geometry_local": {
+            "shape": "oriented_rectangle",
+            "center_xy_m": [
+                float(parent["center_xy_m"][0]) + x * math.cos(radians) - y * math.sin(radians),
+                float(parent["center_xy_m"][1]) + x * math.sin(radians) + y * math.cos(radians),
+            ],
+            "width_m": float(relative["width_ratio"]) * float(parent["width_m"]),
+            "length_m": float(relative["length_ratio"]) * float(parent["length_m"]),
+            "height_m": float(relative["height_m"]),
+            "rotation_deg": float(parent["rotation_deg"]) + float(relative.get("rotation_offset_deg", 0)),
+        },
+        "attributes": {"capacity_mw": max(1.0, float(component.get("attributes", {}).get("capacity_mw", 1.0)))},
+    }
+
+
 def scene_state_from_snapshot(snapshot: dict) -> dict:
     """Build the mutable visual state from one immutable SiteSnapshot."""
     parcel = shape(snapshot["geometry"])
@@ -186,23 +325,29 @@ def scene_state_from_snapshot(snapshot: dict) -> dict:
                 "representation": "CONCEPTUAL_FLAT",
             },
         ],
-        "proposed": [
-            {
-                "id": "data_center_1",
-                "kind": "data_center",
-                "origin": "PROPOSED",
-                "geometry_local": {
-                    "shape": "oriented_rectangle",
-                    "center_xy_m": _local_xy(centroid.y, centroid.x, origin),
-                    "width_m": 250.0,
-                    "length_m": 350.0,
-                    "height_m": 28.0,
-                    "rotation_deg": 0.0,
-                },
-                "attributes": {"capacity_mw": 100.0},
-                "assumption_profile": "conceptual_data_center_v1",
-            }
-        ],
+        "proposed": [conceptual_data_center_campus(
+            center_xy_m=_local_xy(centroid.y, centroid.x, origin),
+            width_m=410.792,
+            length_m=547.723,
+            height_m=24.0,
+            rotation_deg=0.0,
+            capacity_mw=100.0,
+        )],
+        "render_contract": {
+            "version": "semantic_scene_v1",
+            "authoritative_state": "scene_state",
+            "future_outputs": ["rgb", "depth", "semantic_segmentation", "proposed_geometry_metadata"],
+            "origin_classes": ["OBSERVED", "DERIVED", "PROPOSED", "GENERATED"],
+            "semantic_masks": {
+                "parcel": "OBSERVED.parcel_boundary",
+                "terrain": "OBSERVED.world.terrain",
+                "roads": "OBSERVED.world.roads",
+                "buildings": "OBSERVED.world.buildings",
+                "water": "OBSERVED.world.water",
+                "land_cover": "OBSERVED.world.land_cover",
+                "proposed_objects": "PROPOSED.*",
+            },
+        },
         "camera": {"center": {"lng": centroid.x, "lat": centroid.y}, "zoom": 17.0, "pitch": 55.0, "bearing": 0.0},
     }
 
@@ -420,13 +565,18 @@ class SiteSnapshotService:
         now: float | None = None,
         test_expiry_overrides: dict[str, float] | None = None,
         fields: list[str] | tuple[str, ...] | None = None,
+        project_profile: str | None = None,
     ) -> dict:
         snapshot = self.store.get_site_snapshot(snapshot_id)
         if snapshot is None:
             raise SandboxError("SiteSnapshot not found.")
-        freshness = self.freshness_status(
-            snapshot_id, now=now, test_expiry_overrides=test_expiry_overrides, fields=fields,
-        )
+        project_plan = None
+        preset = None
+        fetch_fields = None
+        if project_profile is not None:
+            project_plan = await self.project_intelligence_plan(snapshot_id, profile=project_profile, now=now)
+            fields = project_plan["fields"]
+        freshness = self.freshness_status(snapshot_id, now=now, test_expiry_overrides=test_expiry_overrides, fields=fields)
         if not freshness["refresh_required"]:
             return {
                 "status": "NO_REFRESH_REQUIRED",
@@ -437,10 +587,19 @@ class SiteSnapshotService:
                 "confirmation_required": False,
             }
 
-        fields = sorted(set(freshness["refresh_fields"]) | set(REFRESH_IDENTITY_FIELDS))
+        if project_plan is not None:
+            preset_fields = set(project_plan["preset_fields"])
+            refresh_fields = set(freshness["refresh_fields"])
+            explicit_fields = refresh_fields | set(REFRESH_IDENTITY_FIELDS)
+            preset = project_profile if len(explicit_fields) > MIREYE_EXPLICIT_FIELD_LIMIT and refresh_fields & preset_fields else None
+            fetch_fields = sorted((refresh_fields - preset_fields if preset else refresh_fields) | set(REFRESH_IDENTITY_FIELDS))
+            fields = sorted((preset_fields if preset else set()) | set(fetch_fields))
+        else:
+            fields = sorted(set(freshness["refresh_fields"]) | set(REFRESH_IDENTITY_FIELDS))
+            fetch_fields = fields
         try:
-            _selected_fields, catalog = await self._catalog_selection(fields)
-            quote = await self.client.fetch_quote(locations=1, fields=fields)
+            _selected_fields, catalog = await self._catalog_selection(fetch_fields if preset else fields)
+            quote = await self.client.fetch_quote(locations=1, fields=fetch_fields, preset=preset)
         except httpx.HTTPError as exc:
             raise MireyeUnavailableError("MIREYE refresh quote is temporarily unavailable.") from exc
         created_at = time.time() if now is None else float(now)
@@ -463,6 +622,10 @@ class SiteSnapshotService:
             "snapshot_id": snapshot_id,
             "status": "QUOTED",
             "requested_fields": fields,
+            "fetch_fields": fetch_fields,
+            "preset": preset,
+            "project_profile": project_profile,
+            "field_manifest": project_plan["field_manifest"] if project_plan else None,
             "candidate_site_count": 1,
             "batch_strategy": "single_location",
             "cache_hits": {"fresh_field_count": len(freshness["fresh_fields"]), "fresh_fields": freshness["fresh_fields"]},
@@ -515,10 +678,18 @@ class SiteSnapshotService:
         self.store.update_mireye_spend_plan(spend_plan_id, status="CONFIRMED")
         fields = list(plan["requested_fields"])
         try:
-            _selected_fields, catalog = await self._catalog_selection(fields)
+            _selected_fields, catalog = await self._catalog_selection(plan.get("fetch_fields") or fields)
             point = previous["parcel_identity"]["selected_point"]
-            request = {"lat": float(point["lat"]), "lng": float(point["lng"]), "fields": fields}
-            dossier = await self.client.fetch(lat=request["lat"], lng=request["lng"], fields=fields)
+            request = {
+                "lat": float(point["lat"]), "lng": float(point["lng"]),
+                "fields": plan.get("fetch_fields") or fields,
+            }
+            if plan.get("preset"):
+                request["preset"] = plan["preset"]
+            dossier = await self.client.fetch(
+                lat=request["lat"], lng=request["lng"],
+                fields=request["fields"], preset=plan.get("preset"),
+            )
         except httpx.HTTPError as exc:
             raise MireyeUnavailableError("MIREYE refresh fetch is temporarily unavailable.") from exc
         if dossier.get("ok") is False:
@@ -567,6 +738,61 @@ class SiteSnapshotService:
 
     async def _field_selection(self) -> tuple[list[str], dict]:
         return await self._catalog_selection(list(SITE_SNAPSHOT_FIELDS))
+
+    async def project_intelligence_plan(
+        self, snapshot_id: str, *, profile: str = DATA_CENTER_SITING_PRESET, now: float | None = None,
+    ) -> dict:
+        """Plan one project-specific evidence pass from the live catalog without fetching."""
+        if self.store.get_site_snapshot(snapshot_id) is None:
+            raise SandboxError("SiteSnapshot not found.")
+        try:
+            catalog = await self.client.meta_fields()
+        except httpx.HTTPError as exc:
+            raise MireyeUnavailableError("MIREYE field catalog is temporarily unavailable.") from exc
+        presets = catalog.get("presets") or {}
+        preset_fields = presets.get(profile)
+        if not isinstance(preset_fields, list) or not preset_fields:
+            raise FieldCatalogError(f"Current MIREYE catalog lacks the {profile} preset.")
+        metadata = {
+            item["name"]: item for item in catalog.get("fields", [])
+            if isinstance(item, dict) and item.get("name")
+        }
+        supplemental = [name for name in DATA_CENTER_CONTEXT_FIELDS if name in metadata and name not in preset_fields]
+        fields = list(dict.fromkeys([*preset_fields, *supplemental]))
+        freshness = self.freshness_status(snapshot_id, now=now, fields=fields)
+        field_manifest = [{
+            "field": name,
+            "source": metadata.get(name, {}).get("source"),
+            "source_url": metadata.get(name, {}).get("source_url"),
+            "scope": metadata.get(name, {}).get("scope") or metadata.get(name, {}).get("spatial_scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(name),
+            "unit": metadata.get(name, {}).get("unit"),
+            "ttl_seconds": metadata.get(name, {}).get("ttl_seconds"),
+            "description": metadata.get(name, {}).get("description"),
+            "interpretation_hints": metadata.get(name, {}).get("interpretation_hints"),
+            "metadata_status": "AVAILABLE" if name in metadata else "PRESET_ONLY",
+            "decision_role": "DECISION_SUPPORT" if name in SITE_SNAPSHOT_FIELD_SCOPES else "CONTEXT",
+        } for name in fields]
+        return {
+            "profile": profile,
+            "catalog_version": self._catalog_version(catalog),
+            "preset_fields": list(preset_fields),
+            "supplemental_fields": supplemental,
+            "fields": fields,
+            "field_count": len(fields),
+            "freshness": freshness,
+            "field_manifest": field_manifest,
+            "known_gaps": [{
+                "requested_field": "site_deliverable_grid_capacity_mw",
+                "reason": "A 100 MW phase and 300 MW expansion require utility-confirmed deliverability.",
+                "nearest_available_fields": [
+                    "nearest_osm_transmission_transformer_rating_mva",
+                    "interconnection_queue_active_capacity_county_mw",
+                    "transmission_redundancy_flag",
+                ],
+                "status": "NOT_PROVEN_BY_CURRENT_CATALOG",
+                "decision_blocking": True,
+            }],
+        }
 
     async def _catalog_selection(self, fields: list[str]) -> tuple[list[str], dict]:
         catalog = await self.client.meta_fields()
@@ -651,7 +877,10 @@ class SiteSnapshotService:
             if name not in refreshed_evidence:
                 record["carried_from_snapshot_id"] = record.get("carried_from_snapshot_id") or previous["snapshot_id"]
         evidence.update(refreshed_evidence)
-        missing_catalog_fields = [name for name in spend_plan["requested_fields"] if name not in catalog_fields]
+        missing_catalog_fields = [
+            name for name in spend_plan.get("fetch_fields", spend_plan["requested_fields"])
+            if name not in catalog_fields
+        ]
         if missing_catalog_fields:
             raise FieldCatalogError(f"Current MIREYE catalog lacks refresh fields: {', '.join(missing_catalog_fields)}")
         identity = self._validate_identity(evidence, request)
@@ -698,9 +927,8 @@ class SiteSnapshotService:
             return "missing", "Evidence record is missing."
         if str(record.get("lifecycle", "")).lower() == "deprecated":
             return "deprecated", "Field is deprecated in its captured catalog metadata."
-        if record.get("value") is None:
-            return "missing", "Evidence value is null or absent."
-        if record.get("status") not in {"ok", None}:
+        status = str(record.get("status") or "ok").lower()
+        if status not in {"ok", "absent"}:
             return "incompatible", f"Evidence status is not usable: {record.get('status')}."
         expected_scope = SITE_SNAPSHOT_FIELD_SCOPES.get(field)
         if expected_scope and record.get("scope") not in {expected_scope, None}:
@@ -711,6 +939,8 @@ class SiteSnapshotService:
             return "incompatible", "Evidence has invalid freshness metadata."
         if now >= expires_at:
             return "stale", "Test-time local expiration override has expired." if test_expires_at is not None else "Evidence TTL has expired."
+        if status == "absent" or record.get("value") is None:
+            return "fresh", "Provider-confirmed absence is cached within its field-level TTL."
         return "fresh", "Evidence is usable and within its field-level TTL."
 
     @staticmethod
@@ -834,7 +1064,7 @@ class SiteSnapshotService:
         for name in selected_fields or SITE_SNAPSHOT_FIELDS:
             source_record = source_fields.get(name)
             record = source_record if isinstance(source_record, dict) else {"value": source_record}
-            metadata = catalog_fields[name]
+            metadata = catalog_fields.get(name, {})
             ttl_seconds = int(metadata.get("ttl_seconds") or 0)
             normalized = {
                 "field": name,
@@ -842,9 +1072,16 @@ class SiteSnapshotService:
                 "status": record.get("status", "absent" if source_record is None else "ok"),
                 "confidence": record.get("confidence"),
                 "source": record.get("source") or metadata.get("source"),
+                "source_url": record.get("source_url") or metadata.get("source_url"),
                 "unit": record.get("unit") or metadata.get("unit"),
                 "lifecycle": metadata.get("lifecycle"),
                 "scope": metadata.get("scope") or metadata.get("spatial_scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(name),
+                "description": metadata.get("description"),
+                "interpretation_hints": metadata.get("interpretation_hints"),
+                "null_meaning": metadata.get("null_meaning"),
+                "derivation": metadata.get("derivation"),
+                "presets": metadata.get("presets") or [],
+                "billing": metadata.get("billing"),
                 "ttl_seconds": ttl_seconds,
                 "observed_at": observed_at,
                 "expires_at": observed_at + ttl_seconds,

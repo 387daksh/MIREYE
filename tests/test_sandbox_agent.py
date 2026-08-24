@@ -94,7 +94,7 @@ def executor():
 def test_natural_language_create_and_evaluate_flow_uses_tools_only():
     model = ScriptedModel([
         call("get_site_context", {"snapshot_id": "site-agent-test"}),
-        call("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10}),
+        call("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": ["data_halls", "electrical_area", "cooling_plant", "internal_access", "expansion_reserve"]}),
         call("evaluate_scenario", {"requested_constraints": [
             {"constraint_id": "footprint_inside_parcel"}, {"constraint_id": "footprint_area"}, {"constraint_id": "parcel_coverage", "max_percent": 20},
         ]}),
@@ -106,6 +106,7 @@ def test_natural_language_create_and_evaluate_flow_uses_tools_only():
 
     assert response["evaluation"]["overall_status"] == "PASS"
     assert response["scene_state"]["proposed"][0]["attributes"]["capacity_mw"] == 100
+    assert "service_parking" not in {item["kind"] for item in response["scene_state"]["proposed"][0]["components"]}
     assert [item["tool"] for item in response["tool_trace"]] == ["get_site_context", "propose_data_center", "evaluate_scenario"]
     assert "snapshot_id: site-agent-test" in model.calls[0]["input"][0]["content"]
     assert all("mireye" not in item["tool"] for item in response["tool_trace"])
@@ -122,7 +123,30 @@ def test_move_resize_and_rotate_validate_mutable_proposal():
     geometry = tools.session.scene_state["proposed"][0]["geometry_local"]
     assert geometry["center_xy_m"][1] == original["center_xy_m"][1] + 200
     assert (geometry["width_m"], geometry["length_m"], geometry["rotation_deg"]) == (300, 400, 45)
-    assert tools.session.scene_state["proposed"][0]["attributes"]["capacity_mw"] == 150
+    campus = tools.session.scene_state["proposed"][0]
+    assert campus["attributes"]["capacity_mw"] == 150
+    halls = [item for item in campus["components"] if item["kind"] == "data_hall"]
+    assert sum(item["attributes"]["capacity_mw"] for item in halls) == 150
+    assert next(item for item in campus["components"] if item["kind"] == "expansion_reserve")["attributes"]["capacity_mw"] == 150
+
+
+def test_component_move_is_validated_inside_campus_envelope():
+    _site, tools = executor()
+    campus = tools.session.scene_state["proposed"][0]
+    original = copy.deepcopy(next(item for item in campus["components"] if item["id"] == "electrical_yard")["geometry_relative"])
+
+    tools.execute("transform_object", {
+        "object_id": "electrical_yard", "operation": "move", "delta_x_m": 10, "delta_y_m": 0,
+        "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None,
+    })
+    moved = next(item for item in tools.session.scene_state["proposed"][0]["components"] if item["id"] == "electrical_yard")
+    assert moved["geometry_relative"]["center_uv"][0] > original["center_uv"][0]
+
+    with pytest.raises(ToolValidationError, match="leaves the campus planning envelope"):
+        tools.execute("transform_object", {
+            "object_id": "electrical_yard", "operation": "move", "delta_x_m": 1000, "delta_y_m": 0,
+            "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None,
+        })
 
 
 def test_evaluation_tool_returns_deterministic_authority_output():
@@ -141,7 +165,7 @@ def test_observed_geometry_cannot_be_modified_and_arbitrary_geojson_is_rejected(
     assert site["geometry"] == observed_before
 
     with pytest.raises(ToolValidationError, match="Unexpected tool arguments"):
-        tools.execute("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "geometry": {"type": "Polygon"}})
+        tools.execute("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": None, "geometry": {"type": "Polygon"}})
 
 
 def test_unsupported_constraint_is_unresolved_and_malformed_tool_call_fails_safely():

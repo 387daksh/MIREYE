@@ -63,7 +63,7 @@ def test_accepted_chat_mutation_creates_revision_and_rejected_call_does_not(tmp_
     def reply(name, arguments):
         return ModelReply("", [{"id": name, "name": name, "arguments": json.dumps(arguments)}], [])
 
-    create = reply("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10})
+    create = reply("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": None})
     final = ModelReply("done", [], [])
     agent = SandboxAgent(model=Model([create, final]), sessions=InMemorySandboxSessions(), scenarios=service)
     response = _run(agent.chat(site, "session", "Place a 100 MW data center."))

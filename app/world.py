@@ -26,7 +26,10 @@ from app.workspace.store import WorkspaceStore
 WORLD_SCHEMA_VERSION = "world_snapshot_v1"
 TERRAIN_ENCODING_VERSION = "mapbox_terrain_rgb_v1"
 TERRAIN_SAMPLING_VERSION = "pinned_dem_bilinear_v1"
+TERRAIN_MIN_ZOOM = 12
+TERRAIN_TILE_PYRAMID_VERSION = "aoi_tile_cover_v2"
 DEFAULT_OVERTURE_RELEASE = "2026-08-19.0"
+OVERTURE_BUILD_TIMEOUT_SECONDS = 240
 OVERTURE_RELEASE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}\.\d+$")
 USGS_PRODUCTS_URL = "https://tnmaccess.nationalmap.gov/api/v1/products"
 USGS_ELEVATION_EXPORT_URL = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
@@ -124,6 +127,15 @@ def _tile_bounds_3857(x: int, y: int, zoom: int) -> tuple[float, float, float, f
     return min_x, max_y - size, min_x + size, max_y
 
 
+def _tile_cover_bbox(bbox: list[float], zoom: int) -> list[float]:
+    min_x, max_y = _tile_xy(bbox[0], bbox[3], zoom)
+    max_x, min_y = _tile_xy(bbox[2], bbox[1], zoom)
+    scale = 2**zoom
+    longitude = lambda x: x / scale * 360.0 - 180.0
+    latitude = lambda y: math.degrees(math.atan(math.sinh(math.pi * (1 - 2 * y / scale))))
+    return [longitude(min_x), latitude(min_y + 1), longitude(max_x + 1), latitude(max_y)]
+
+
 def road_geojson(table, bbox: list[float]) -> dict:
     """Create deterministic AOI-clipped render geometry while retaining source rows separately."""
     clip = box(*bbox)
@@ -140,11 +152,11 @@ def road_geojson(table, bbox: list[float]) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
-def as_geoparquet(table, bbox: list[float]):
+def as_geoparquet(table, bbox: list[float], geometry_types: list[str] | None = None):
     metadata = dict(table.schema.metadata or {})
     metadata[b"geo"] = _canonical({
         "version": "1.1.0", "primary_column": "geometry",
-        "columns": {"geometry": {"encoding": "WKB", "geometry_types": ["LineString", "MultiLineString"], "crs": "OGC:CRS84", "bbox": bbox}},
+        "columns": {"geometry": {"encoding": "WKB", "geometry_types": geometry_types or ["LineString", "MultiLineString"], "crs": "OGC:CRS84", "bbox": bbox}},
     })
     return table.replace_schema_metadata(metadata)
 
@@ -168,12 +180,23 @@ class USGSTerrainProvider:
             raise WorldError("Real terrain requires rasterio; install requirements-world.txt.") from exc
 
         force_10m = options.get("_force_10m", False)
-        product, nominal_resolution = await self._discover(
-            aoi["bbox"], prefer_1m=options.get("prefer_1m", True), force_10m=force_10m,
-        )
+        catalog_warning = None
+        try:
+            product, nominal_resolution = await self._discover(
+                aoi["bbox"], prefer_1m=options.get("prefer_1m", True), force_10m=force_10m,
+            )
+        except httpx.HTTPError:
+            product = {
+                "title": "USGS 3DEP Elevation ImageServer",
+                "downloadURL": USGS_ELEVATION_EXPORT_URL,
+                "sourceId": "3DEP_ELEVATION_IMAGESERVER",
+            }
+            nominal_resolution = 10.0
+            force_10m = True
+            catalog_warning = "USGS catalog metadata was unavailable; using the bounded 3DEP 10 m ImageServer export with vertical datum marked unknown."
         extraction = {"method": "TNM_PRODUCT_DOWNLOAD", "url": product["downloadURL"]}
         if nominal_resolution > 1:
-            source_bytes, extraction = await self._export_10m(aoi["bbox"])
+            source_bytes, extraction = await self._export_10m(_tile_cover_bbox(aoi["bbox"], TERRAIN_MIN_ZOOM))
         else:
             try:
                 source_bytes = await self._download(product["downloadURL"])
@@ -184,7 +207,7 @@ class USGSTerrainProvider:
         source_artifact = artifacts.put(source_bytes, extension="tif", media_type="image/tiff", role="source_dem")
         metadata_artifact = artifacts.put(_canonical({"catalog_product": product, "extraction": extraction}), extension="json", media_type="application/json", role="source_metadata")
         bbox = aoi["bbox"]
-        warnings = []
+        warnings = [catalog_warning] if catalog_warning else []
         with MemoryFile(source_bytes) as memory:
             with memory.open() as source:
                 if source.crs is None:
@@ -206,20 +229,21 @@ class USGSTerrainProvider:
                     raise WorldError("USGS DEM does not contain usable elevation coverage for the sandbox AOI.")
                 grid_artifact = artifacts.put(_npy_bytes(grid), extension="npy", media_type="application/x-npy", role="elevation_grid")
                 zoom = 17 if resolution_m <= 2 else 14
-                min_x, max_y = _tile_xy(bbox[0], bbox[3], zoom)
-                max_x, min_y = _tile_xy(bbox[2], bbox[1], zoom)
                 tiles = {}
-                for x in range(min_x, max_x + 1):
-                    for y in range(max_y, min_y + 1):
-                        tile = np.full((256, 256), np.nan, dtype=np.float32)
-                        reproject(
-                            rasterio.band(source, 1), tile, src_transform=source.transform, src_crs=source.crs,
-                            src_nodata=source.nodata, dst_transform=from_bounds(*_tile_bounds_3857(x, y, zoom), 256, 256),
-                            dst_crs="EPSG:3857", dst_nodata=np.nan, resampling=Resampling.bilinear,
-                        )
-                        tile_artifact = artifacts.put(encode_terrain_rgb(tile), extension="png", media_type="image/png", role="terrain_rgb_tile")
-                        tiles[f"{zoom}/{x}/{y}"] = tile_artifact
-                tile_manifest = {"encoding": TERRAIN_ENCODING_VERSION, "zoom": zoom, "tile_size": 256, "tiles": tiles}
+                for tile_zoom in range(TERRAIN_MIN_ZOOM, zoom + 1):
+                    min_x, max_y = _tile_xy(bbox[0], bbox[3], tile_zoom)
+                    max_x, min_y = _tile_xy(bbox[2], bbox[1], tile_zoom)
+                    for x in range(min_x, max_x + 1):
+                        for y in range(max_y, min_y + 1):
+                            tile = np.full((256, 256), np.nan, dtype=np.float32)
+                            reproject(
+                                rasterio.band(source, 1), tile, src_transform=source.transform, src_crs=source.crs,
+                                src_nodata=source.nodata, dst_transform=from_bounds(*_tile_bounds_3857(x, y, tile_zoom), 256, 256),
+                                dst_crs="EPSG:3857", dst_nodata=np.nan, resampling=Resampling.bilinear,
+                            )
+                            tile_artifact = artifacts.put(encode_terrain_rgb(tile), extension="png", media_type="image/png", role="terrain_rgb_tile")
+                            tiles[f"{tile_zoom}/{x}/{y}"] = tile_artifact
+                tile_manifest = {"encoding": TERRAIN_ENCODING_VERSION, "minzoom": TERRAIN_MIN_ZOOM, "maxzoom": zoom, "tile_size": 256, "tiles": tiles}
                 tile_manifest_artifact = artifacts.put(_canonical(tile_manifest), extension="json", media_type="application/json", role="terrain_tile_manifest")
         if nominal_resolution > 1:
             warnings.append("USGS 1 m coverage was unavailable; using approximately 10 m 3DEP coverage.")
@@ -237,7 +261,9 @@ class USGSTerrainProvider:
                 "actual_resolution_m": round(resolution_m, 6), "source_crs": source_crs,
                 "vertical_reference": vertical_reference, "vertical_units": "meters", "grid_bbox": bbox,
                 "grid_width": 256, "grid_height": 256, "grid_orientation": "north_up",
-                "tile_zoom": zoom, "tile_size": 256, "encoding": TERRAIN_ENCODING_VERSION, "tiles": tiles,
+                "min_tile_zoom": TERRAIN_MIN_ZOOM, "tile_zoom": zoom, "tile_size": 256,
+                "tile_pyramid_version": TERRAIN_TILE_PYRAMID_VERSION,
+                "encoding": TERRAIN_ENCODING_VERSION, "tiles": tiles,
             },
             "warnings": warnings, "conflicts": [],
         }
@@ -350,27 +376,195 @@ class OvertureRoadProvider:
         }
 
 
+def _polygon_geojson(table, bbox: list[float], properties: list[str]) -> dict:
+    clip = box(*bbox)
+    features = []
+    for row in table.to_pylist():
+        geometry = wkb.loads(bytes(row["geometry"])).intersection(clip)
+        if geometry.is_empty:
+            continue
+        features.append({
+            "type": "Feature", "id": row["id"], "geometry": mapping(geometry),
+            "properties": {name: row.get(name) for name in properties},
+        })
+    return {"type": "FeatureCollection", "features": features}
+
+
+class OvertureBuildingProvider:
+    async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
+        release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
+        if not OVERTURE_RELEASE_PATTERN.fullmatch(release):
+            raise WorldError("Invalid Overture release identifier.")
+        return await asyncio.to_thread(self._build_sync, aoi, artifacts, release)
+
+    @staticmethod
+    def _build_sync(aoi: dict, artifacts: ArtifactStore, release: str) -> dict:
+        path = f"s3://overturemaps-us-west-2/release/{release}/theme=buildings/type=building/*"
+        bbox = aoi["bbox"]
+        connection = duckdb.connect()
+        try:
+            connection.execute("INSTALL httpfs")
+            connection.execute("LOAD httpfs")
+            connection.execute("SET s3_region='us-west-2'")
+            table = connection.execute(
+                """
+                SELECT id, names.primary AS name, class, subtype, height AS height_m,
+                       num_floors, geometry, sources, bbox
+                FROM read_parquet(?)
+                WHERE bbox.xmin <= ? AND bbox.xmax >= ?
+                  AND bbox.ymin <= ? AND bbox.ymax >= ?
+                ORDER BY id
+                """,
+                [path, bbox[2], bbox[0], bbox[3], bbox[1]],
+            ).fetch_arrow_table()
+        finally:
+            connection.close()
+        table = as_geoparquet(table, bbox, ["Polygon", "MultiPolygon"])
+        parquet_buffer = io.BytesIO()
+        pq.write_table(table, parquet_buffer, compression="zstd", version="2.6", write_statistics=True)
+        source_artifact = artifacts.put(parquet_buffer.getvalue(), extension="parquet", media_type="application/vnd.apache.parquet", role="overture_buildings_aoi_geoparquet")
+        geojson = _polygon_geojson(table, bbox, ["name", "class", "subtype", "height_m", "num_floors"])
+        render_artifact = artifacts.put(_canonical(geojson), extension="geojson", media_type="application/geo+json", role="buildings_render_geojson")
+        return {
+            "layer": "buildings", "availability": "AVAILABLE", "quality_state": "VERIFIED_SOURCE",
+            "source": {
+                "provider": "Overture Maps Foundation", "release": release,
+                "schema_theme": "buildings/building", "source_uri": path,
+                "license": "ODbL-1.0", "attribution": "Overture Maps Foundation and source contributors",
+            },
+            "artifacts": {"source_geoparquet": source_artifact, "render_geojson": render_artifact},
+            "buildings": {
+                "feature_count": len(geojson["features"]), "identity_field": "GERS id",
+                "height_policy": "source_height_only",
+            },
+            "warnings": ["Buildings without a published source height are rendered as footprints, not invented extrusions."],
+            "conflicts": [],
+        }
+
+
+class OverturePolygonProvider:
+    def __init__(self, layer: str, source_type: str):
+        self.layer, self.source_type = layer, source_type
+
+    async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
+        release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
+        if not OVERTURE_RELEASE_PATTERN.fullmatch(release):
+            raise WorldError("Invalid Overture release identifier.")
+        return await asyncio.to_thread(self._build_sync, aoi, artifacts, release)
+
+    def _build_sync(self, aoi: dict, artifacts: ArtifactStore, release: str) -> dict:
+        path = f"s3://overturemaps-us-west-2/release/{release}/theme=base/type={self.source_type}/*"
+        bbox = aoi["bbox"]
+        connection = duckdb.connect()
+        try:
+            connection.execute("INSTALL httpfs")
+            connection.execute("LOAD httpfs")
+            connection.execute("SET s3_region='us-west-2'")
+            table = connection.execute(
+                """
+                SELECT id, subtype, geometry, sources, bbox
+                FROM read_parquet(?)
+                WHERE bbox.xmin <= ? AND bbox.xmax >= ?
+                  AND bbox.ymin <= ? AND bbox.ymax >= ?
+                ORDER BY id
+                """,
+                [path, bbox[2], bbox[0], bbox[3], bbox[1]],
+            ).fetch_arrow_table()
+        finally:
+            connection.close()
+        table = as_geoparquet(table, bbox, ["Polygon", "MultiPolygon"])
+        parquet_buffer = io.BytesIO()
+        pq.write_table(table, parquet_buffer, compression="zstd", version="2.6", write_statistics=True)
+        source_artifact = artifacts.put(parquet_buffer.getvalue(), extension="parquet", media_type="application/vnd.apache.parquet", role=f"overture_{self.layer}_aoi_geoparquet")
+        geojson = _polygon_geojson(table, bbox, ["subtype"])
+        render_artifact = artifacts.put(_canonical(geojson), extension="geojson", media_type="application/geo+json", role=f"{self.layer}_render_geojson")
+        return {
+            "layer": self.layer, "availability": "AVAILABLE", "quality_state": "VERIFIED_SOURCE",
+            "source": {
+                "provider": "Overture Maps Foundation", "release": release,
+                "schema_theme": f"base/{self.source_type}", "source_uri": path,
+                "license": "ODbL-1.0", "attribution": "Overture Maps Foundation and source contributors",
+            },
+            "artifacts": {"source_geoparquet": source_artifact, "render_geojson": render_artifact},
+            self.layer: {"feature_count": len(geojson["features"]), "identity_field": "GERS id"},
+            "warnings": [], "conflicts": [],
+        }
+
+
 class WorldSnapshotService:
-    def __init__(self, store: WorkspaceStore, artifacts: ArtifactStore, *, terrain_provider=None, road_provider=None):
+    def __init__(
+        self, store: WorkspaceStore, artifacts: ArtifactStore, *, terrain_provider=None,
+        road_provider=None, building_provider=None, water_provider=None, land_cover_provider=None,
+    ):
         self.store, self.artifacts = store, artifacts
         self.terrain_provider = terrain_provider or USGSTerrainProvider()
         self.road_provider = road_provider or OvertureRoadProvider()
+        self.building_provider = building_provider or OvertureBuildingProvider()
+        self.water_provider = water_provider or OverturePolygonProvider("water", "water")
+        self.land_cover_provider = land_cover_provider or OverturePolygonProvider("land_cover", "land_cover")
 
     async def create(self, *, site_snapshot_id: str, buffer_m: float = 1000, requested_layers: list[str] | None = None, options: dict | None = None) -> dict:
         site = self.store.get_site_snapshot(site_snapshot_id)
         if site is None:
             raise WorldError("SiteSnapshot not found.")
         layers = requested_layers or ["terrain", "roads"]
-        invalid = set(layers) - {"terrain", "roads", "transmission"}
+        invalid = set(layers) - {"terrain", "roads", "buildings", "water", "land_cover", "transmission"}
         if invalid:
             raise WorldError(f"Unsupported world layers: {', '.join(sorted(invalid))}.")
         query_aoi = parcel_aoi(site["geometry"], buffer_m=buffer_m)
+        latest = self.latest_for_site_snapshot(site_snapshot_id)
+        if latest is None:
+            latest = next((item for item in self.store.list_world_snapshots() if item.get("query_aoi", {}).get("bbox") == query_aoi["bbox"] and item["query_aoi"].get("buffer_m") == query_aoi["buffer_m"]), None)
+        same_aoi = latest and latest.get("query_aoi", {}).get("bbox") == query_aoi["bbox"] and latest["query_aoi"].get("buffer_m") == query_aoi["buffer_m"]
+        existing = {item["layer"]: item for item in latest.get("layers", [])} if same_aoi else {}
         built = []
         options = options or {}
         if "terrain" in layers:
-            built.append(await self.terrain_provider.build(query_aoi, self.artifacts, options))
+            terrain = existing.get("terrain")
+            try:
+                built.append(terrain if terrain and terrain.get("terrain", {}).get("tile_pyramid_version") == TERRAIN_TILE_PYRAMID_VERSION else await self.terrain_provider.build(query_aoi, self.artifacts, options))
+            except (WorldError, httpx.HTTPError) as exc:
+                built.append({
+                    "layer": "terrain", "availability": "UNAVAILABLE", "quality_state": "SOURCE_UNAVAILABLE",
+                    "source": {"provider": "USGS", "dataset": "3DEP"}, "artifacts": {},
+                    "warnings": [f"USGS terrain could not be loaded: {exc}"], "conflicts": [],
+                })
         if "roads" in layers:
-            built.append(await self.road_provider.build(query_aoi, self.artifacts, options))
+            roads = existing.get("roads")
+            requested_release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
+            try:
+                built.append(roads if roads and roads.get("source", {}).get("release") == requested_release else await self.road_provider.build(query_aoi, self.artifacts, options))
+            except (WorldError, duckdb.Error, httpx.HTTPError) as exc:
+                built.append({
+                    "layer": "roads", "availability": "UNAVAILABLE", "quality_state": "SOURCE_UNAVAILABLE",
+                    "source": {"provider": "Overture Maps Foundation", "release": requested_release}, "artifacts": {},
+                    "warnings": [f"Overture roads could not be loaded: {exc}"], "conflicts": [],
+                })
+        optional_layers = [item for item in (
+            ("buildings", self.building_provider),
+            ("water", self.water_provider),
+            ("land_cover", self.land_cover_provider),
+        ) if item[0] in layers]
+
+        async def build_optional(layer_name, provider):
+            current = existing.get(layer_name)
+            requested_release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
+            try:
+                if current and current.get("source", {}).get("release") == requested_release:
+                    return current
+                return await asyncio.wait_for(
+                    provider.build(query_aoi, self.artifacts, options),
+                    timeout=OVERTURE_BUILD_TIMEOUT_SECONDS,
+                )
+            except (WorldError, duckdb.Error, httpx.HTTPError, asyncio.TimeoutError) as exc:
+                return {
+                    "layer": layer_name, "availability": "UNAVAILABLE", "quality_state": "SOURCE_UNAVAILABLE",
+                    "source": {"provider": "Overture Maps Foundation", "release": requested_release},
+                    "artifacts": {}, "warnings": [f"Overture {layer_name.replace('_', ' ')} could not be loaded within the bounded request: {str(exc) or 'timeout'}"], "conflicts": [],
+                }
+
+        if optional_layers:
+            built.extend(await asyncio.gather(*(build_optional(*item) for item in optional_layers)))
         if "transmission" in layers:
             built.append({
                 "layer": "transmission", "availability": "UNAVAILABLE", "quality_state": "SOURCE_UNVERIFIED",
@@ -407,11 +601,14 @@ class WorldSnapshotService:
                     artifact.pop("storage_key", None)
                 layer["render"] = {
                     "type": "raster-dem", "encoding": "mapbox", "tile_size": layer["terrain"]["tile_size"],
-                    "minzoom": layer["terrain"]["tile_zoom"], "maxzoom": layer["terrain"]["tile_zoom"],
+                    "minzoom": layer["terrain"].get("min_tile_zoom", layer["terrain"]["tile_zoom"]),
+                    "maxzoom": layer["terrain"]["tile_zoom"],
                     "tiles": [f"/v1/sandbox/world-snapshots/{snapshot['world_snapshot_id']}/terrain/{{z}}/{{x}}/{{y}}"],
                 }
-            if layer["layer"] == "roads" and layer["availability"] == "AVAILABLE":
-                layer["render"] = {"type": "geojson", "url": f"/v1/sandbox/world-snapshots/{snapshot['world_snapshot_id']}/roads"}
+            if layer["layer"] in {"roads", "buildings", "water", "land_cover"} and layer["availability"] == "AVAILABLE":
+                layer["render"] = {"type": "geojson", "url": f"/v1/sandbox/world-snapshots/{snapshot['world_snapshot_id']}/layers/{layer['layer']}"}
+        for entry in result["source_manifest"]:
+            entry["acquired_at"] = result["created_at"]
         return result
 
     def artifact_for_tile(self, snapshot: dict, z: int, x: int, y: int) -> Path:
@@ -424,6 +621,11 @@ class WorldSnapshotService:
     def road_artifact(self, snapshot: dict) -> Path:
         return self.artifacts.path(self._layer(snapshot, "roads")["artifacts"]["render_geojson"])
 
+    def vector_artifact(self, snapshot: dict, layer_name: str) -> Path:
+        if layer_name not in {"roads", "buildings", "water", "land_cover"}:
+            raise WorldError("World vector layer is unavailable.")
+        return self.artifacts.path(self._layer(snapshot, layer_name)["artifacts"]["render_geojson"])
+
     def anchor_scene(self, scene_state: dict, world_snapshot_id: str) -> dict:
         snapshot = self.get(world_snapshot_id)
         if snapshot is None:
@@ -432,9 +634,16 @@ class WorldSnapshotService:
             raise WorldError("WorldSnapshot does not reference this scene's SiteSnapshot.")
         layer = self._layer(snapshot, "terrain")
         if layer["availability"] != "AVAILABLE" or layer.get("terrain", {}).get("vertical_reference") == "UNKNOWN":
-            raise WorldError("Pinned terrain is unavailable for deterministic anchoring.")
+            result = json.loads(json.dumps(scene_state))
+            result["world_snapshot_id"] = world_snapshot_id
+            result["terrain_anchor_status"] = {
+                "status": "UNRESOLVED",
+                "reason": "Pinned terrain has no verified vertical reference; proposed elevations were not assigned.",
+            }
+            return result
         result = json.loads(json.dumps(scene_state))
         result["world_snapshot_id"] = world_snapshot_id
+        result["terrain_anchor_status"] = {"status": "DERIVED", "vertical_reference": layer["terrain"]["vertical_reference"]}
         origin = result["frame"]["origin"]
         for item in result.get("proposed", []):
             x, y = item["geometry_local"]["center_xy_m"]

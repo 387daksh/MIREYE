@@ -19,7 +19,7 @@ if str(ROOT) not in sys.path:
 
 def parser() -> argparse.ArgumentParser:
     result = argparse.ArgumentParser(description="Create one real MIREYE + USGS 3DEP + Overture WorldSnapshot demo.")
-    result.add_argument("--address", default="1600 Pennsylvania Avenue NW, Washington, DC")
+    result.add_argument("--address", default="1 Tesla Road, Austin, TX 78725")
     result.add_argument("--candidate", type=int)
     result.add_argument("--confirm", action="store_true", help="Confirm the one-location MIREYE fetch after quoting it.")
     result.add_argument("--serve", action="store_true")
@@ -64,7 +64,7 @@ async def build(args) -> dict:
     scene["world_snapshot_id"] = world["world_snapshot_id"]
     scenario = scenario_service.create(
         snapshot, workspace_id=snapshot["workspace_id"],
-        user_intent="Grounded 100 MW data-center concept on the pinned physical world.",
+        user_intent="Grounded 100 MW phase-1 campus with a 300 MW expansion target on the pinned physical world.",
         scene_state=scene, model_id="deterministic_world_demo_bootstrap",
     )
     return {"snapshot": snapshot, "world": world, "scenario": scenario, "quote": provisioned["quote"]}

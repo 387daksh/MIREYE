@@ -20,7 +20,7 @@ Create one real SiteSnapshot, a validated 100 MW proposal, and a temporary SQLit
 python -m app.sandbox_demo --confirm --serve
 ```
 
-`--confirm` authorizes the quoted fetch for one parcel. Omit it to review the quote and type `YES` interactively. The default address is `1 Tesla Road, Austin, TX 78725`; override it with `--address "..."`. If lookup is ambiguous, re-run with the printed one-based `--candidate N` selection.
+`--confirm` authorizes the quoted fetch for one parcel. Omit it to review the quote and type `YES` interactively. The flagship address is `1 Tesla Road, Austin, TX 78725`; a prior live run resolved it to MIREYE's canonical parcel address `2025 1/2 ROBOTIC AVE`, approximately 1,698 acres. The site is an industrial-scale visualization example, not a claim of data-center suitability or availability. Override it with `--address "..."`. If lookup is ambiguous, re-run with the printed one-based `--candidate N` selection.
 
 The launcher prints:
 
@@ -43,14 +43,15 @@ http://127.0.0.1:8000/
 
 ## Demo Flow
 
-1. Open the printed URL. Confirm the real parcel boundary, terrain, roads, and resolution point are visible and the camera fits the parcel.
-2. Confirm the orange conceptual 100 MW data center is visually distinct from observed geometry.
-3. Review Site intelligence, MIREYE site intelligence, Proposed design, and the Observed / Derived / Proposed legend.
-4. Click an example prompt to place it in the chat input, then send it.
-5. Try `Move it 200 meters north.`, `Make it 120 m by 140 m.`, `Rotate it 30 degrees.`, and `Does it fit?`.
-6. Confirm every evaluation shows PASS, FAIL, or UNRESOLVED with a deterministic reason. Use View sources for factual provenance and freshness.
-7. Use Try another to create another option, change its capacity or geometry, select both options, and use Compare options.
-8. Confirm the parcel geometry never changes while the orange proposed object does.
+1. Open the printed URL. Confirm the authoritative parcel, USGS terrain relief, hierarchical Overture roads, scale control, and restrained conceptual campus are visible.
+2. Review the project header, site-feasibility cards, MIREYE freshness, and the OBSERVED / DERIVED / PROPOSED legend.
+3. Ask `Design a 100 MW phase-1 campus with room for 300 MW later.`
+4. Confirm the proposed data halls, electrical area, cooling plant, internal access, service parking, security envelope, and expansion reserve remain explicitly conceptual.
+5. Ask `Create a second layout with more expansion room.` and then `Which layout uses the least land?`
+6. Compare the saved alternatives. Capacity, land envelope, evaluator outcomes, and changed constraints must come from deterministic scenario state.
+7. Ask `Why is grid capacity unresolved?` Confirm proximity evidence is not presented as available MW.
+8. Open View sources, then quote and confirm a MIREYE refresh if stale fields exist.
+9. Confirm the observed parcel and WorldSnapshot never change when proposed layouts change.
 
 Live chat requires `OPENAI_API_KEY`. Without it, snapshot, scene, evaluator, proposal, scenario persistence, branching, comparison, and scripted agent tools remain testable; the chat endpoint reports model unavailability explicitly.
 

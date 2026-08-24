@@ -31,6 +31,9 @@
       <div class="layer-controls" id="worldPanel" hidden>
         <label><input id="terrainToggle" type="checkbox" checked disabled> Terrain</label>
         <label><input id="roadsToggle" type="checkbox" checked disabled> Roads</label>
+        <label><input id="buildingsToggle" type="checkbox" checked disabled> Buildings</label>
+        <label><input id="waterToggle" type="checkbox" checked disabled> Water</label>
+        <label><input id="landCoverToggle" type="checkbox" checked disabled> Land cover</label>
         <span id="worldState">Observed layers</span>
       </div>
       <div class="sandbox-error" id="sandboxError" hidden></div>
@@ -42,13 +45,11 @@
           <div class="evaluation-results" id="chatEvaluation" hidden></div>
         </div>
         <div class="prompt-strip sandbox-demo-prompts" aria-label="Example instructions">
-          <button type="button">Put a 100 MW data center here.</button>
-          <button type="button">Move it 200 meters north.</button>
-          <button type="button">Make it 120 m by 140 m.</button>
-          <button type="button">Rotate it 30 degrees.</button>
-          <button type="button">Does it fit?</button>
-          <button type="button">Try a second option at 150 MW.</button>
-          <button type="button">Which option is better?</button>
+          <button type="button">Design a 100 MW phase-1 campus with room for 300 MW later.</button>
+          <button type="button">Create a second layout with more expansion room.</button>
+          <button type="button">Which layout uses the least land?</button>
+          <button type="button">Why is grid capacity unresolved?</button>
+          <button type="button">Refresh the MIREYE intelligence.</button>
         </div>
         <div class="chat-composer">
           <label class="sr-only" for="chatMessage">Ask about this site</label>
@@ -60,11 +61,22 @@
     </section>
 
     <aside class="site-rail">
-      <section class="rail-section site-summary">
-        <p class="rail-kicker">Site intelligence</p>
-        <h1 id="siteName">Real property</h1>
+      <section class="rail-section project-summary">
+        <p class="rail-kicker">Project</p>
+        <h1>100 MW AI Data Center</h1>
+        <dl class="project-facts">
+          <div><dt>Phase 1</dt><dd>100 MW</dd></div>
+          <div><dt>Expansion target</dt><dd>300 MW</dd></div>
+        </dl>
+        <p class="site-label">Site</p>
+        <h2 id="siteName">Real property</h2>
         <p id="parcelMeta">Verified parcel geometry</p>
         <dl class="compact-facts" id="snapshotFacts"></dl>
+      </section>
+
+      <section class="rail-section feasibility-section">
+        <div class="rail-heading"><div><p class="rail-kicker">Site feasibility</p><h2>Current evidence</h2></div><span class="origin-label derived">Derived</span></div>
+        <div class="feasibility-grid" id="feasibilityCards" aria-live="polite"></div>
       </section>
 
       <section class="rail-section intelligence-card">
@@ -82,9 +94,10 @@
       </section>
 
       <section class="rail-section design-summary">
-        <div class="rail-heading"><div><p class="rail-kicker">Proposed design</p><h2>Data center</h2></div><span class="origin-label proposed">Proposed</span></div>
+        <div class="rail-heading"><div><p class="rail-kicker">Proposed design</p><h2>Phase 1 campus</h2></div><span class="origin-label proposed">Proposed</span></div>
         <dl class="compact-facts" id="designFacts"></dl>
-        <p class="caveat">Conceptual layout only. No engineering or grid-capacity claim is implied.</p>
+        <ul class="campus-elements" id="campusElements"></ul>
+        <p class="caveat">Conceptual planning envelope and massing only. No engineering, grading, utility-capacity, or construction claim is implied.</p>
       </section>
 
       <section class="rail-section scenario-section">
@@ -102,7 +115,7 @@
       </section>
 
       <section class="rail-section world-details" id="worldDetails" hidden>
-        <p class="rail-kicker">Observed world layers</p>
+        <p class="rail-kicker">Physical context</p>
         <dl class="compact-facts" id="worldFacts"></dl>
         <div id="worldSources" hidden></div>
         <p class="caveat" id="worldWarning"></p>

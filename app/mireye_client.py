@@ -285,7 +285,7 @@ class MireyeClient:
     async def meta_fields(self) -> dict:
         """Return the live/local catalog of supported geospatial and zoning fields."""
         if self.mode == "live":
-            res = await self._request("GET", "/v1/meta/fields")
+            res = await self._request("GET", "/v1/meta/fields", params={"lifecycle": "all"})
             if isinstance(res, dict) and "total_fields" not in res and "fields" in res:
                 res["total_fields"] = len(res["fields"])
             return res
@@ -400,3 +400,14 @@ class MireyeClient:
             "credits_remaining": 999999,
             "tier": "enterprise_local",
         }
+
+    async def create_field_request(self, payload: dict) -> dict:
+        """Submit a documented MIREYE field request; callers own user confirmation."""
+        if self.mode != "live":
+            return {"status": "unavailable", "reason": "Field requests require live MIREYE mode."}
+        return await self._request("POST", "/v1/field-requests", json_body=payload)
+
+    async def get_field_request(self, request_id: str) -> dict:
+        if self.mode != "live":
+            return {"status": "unavailable", "reason": "Field requests require live MIREYE mode."}
+        return await self._request("GET", f"/v1/field-requests/{request_id}")

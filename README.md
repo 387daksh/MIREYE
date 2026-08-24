@@ -100,6 +100,18 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 
 Open `http://127.0.0.1:8000/`.
 
+For the shortest safe startup, use the included launcher. It creates a new temporary database and world-asset directory on every run:
+
+```powershell
+.\start.ps1
+```
+
+Use another port or enable development reload when needed:
+
+```powershell
+.\start.ps1 -Port 8001 -Reload
+```
+
 ## Live Demo Paths
 
 ### One real parcel
@@ -130,7 +142,9 @@ Unless `--db` is supplied, the command creates a new temporary SQLite database a
 python scripts/live_world_snapshot_demo.py --confirm --serve
 ```
 
-This creates a temporary database and content-addressed asset directory, fetches one confirmed MIREYE parcel, downloads a bounded USGS 3DEP DEM, extracts release-pinned Overture roads for the parcel AOI, and prints the exact sandbox URL.
+The flagship configuration uses `1 Tesla Road, Austin, TX 78725`, which previously resolved through MIREYE to the canonical parcel address `2025 1/2 ROBOTIC AVE` with approximately 1,698 acres. It is used because it provides credible industrial-scale spatial context; the demo does not claim that the parcel is suitable or available for data-center development.
+
+The command creates a temporary database and content-addressed asset directory, fetches one confirmed MIREYE parcel, downloads a bounded USGS 3DEP DEM, extracts release-pinned Overture roads for the parcel AOI, and prints the exact sandbox URL.
 
 ### Supplied-candidate diligence
 

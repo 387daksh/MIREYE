@@ -1,5 +1,6 @@
 import asyncio
 import json
+from pathlib import Path
 
 import pytest
 import httpx
@@ -43,6 +44,7 @@ class FakeMireyeClient:
                 {
                     "name": name,
                     "source": "MIREYE_TEST",
+                    "source_url": "https://example.test/source",
                     "unit": None,
                     "lifecycle": "stable",
                     "ttl_seconds": 60,
@@ -159,6 +161,29 @@ def test_quote_uses_current_live_payload_for_one_exact_field_list(monkeypatch):
     assert captured["json_body"] == {"locations": 1, "fields": ["parcel_id"]}
 
 
+def test_field_request_uses_documented_idempotent_contract(monkeypatch):
+    client = MireyeClient(api_key="test-key", mode="live")
+    captured = {}
+    payload = {
+        "description": "Utility-confirmed deliverable MW at a supplied parcel.",
+        "example_locations": [{"lat": 32.0, "lng": -97.0}],
+        "idempotency_key": "site-capacity-v1",
+    }
+
+    async def fake_request(method, path, json_body=None, params=None):
+        captured.update(method=method, path=path, json_body=json_body, params=params)
+        return {"request_id": "field-request-1", "status": "pending"}
+
+    monkeypatch.setattr(client, "_request", fake_request)
+    result = _run(client.create_field_request(payload))
+
+    assert result["status"] == "pending"
+    assert captured == {
+        "method": "POST", "path": "/v1/field-requests",
+        "json_body": payload, "params": None,
+    }
+
+
 def test_ambiguous_lookup_requires_explicit_selection(sandbox):
     service, client, _store = sandbox
     client.lookup_response = {
@@ -217,6 +242,47 @@ def test_snapshot_hashes_are_stable_and_ttl_expiry_is_detected(sandbox):
     assert loaded["is_expired"] is True
 
 
+def test_fresh_provider_absence_is_unresolved_but_not_requoted(sandbox):
+    service, client, _store = sandbox
+    client.fields["parcel_zoning"] = {"value": None, "status": "absent", "confidence": "high"}
+    snapshot = _run(service.create_snapshot(workspace_id="ws-1", lat=32.0, lng=-97.0, confirmed=True))
+
+    status = service.freshness_status(
+        snapshot["snapshot_id"], now=snapshot["observed_at"] + 1, fields=["parcel_zoning"],
+    )
+
+    assert status["refresh_required"] is False
+    assert status["fresh_fields"] == ["parcel_zoning"]
+    assert snapshot["evidence"]["parcel_zoning"]["value"] is None
+
+
+def test_data_center_intelligence_plan_uses_preset_plus_only_catalog_supplements(sandbox):
+    service, client, _store = sandbox
+    snapshot = _run(service.create_snapshot(workspace_id="ws-1", lat=32.0, lng=-97.0, confirmed=True))
+    catalog = client._catalog()
+    catalog["presets"] = {"data_center_siting": ["nearest_power_plant_sector", "slope_degrees"]}
+    catalog["fields"].extend([
+        {"name": "nearest_power_plant_sector", "source": "EIA", "source_url": "https://atlas.eia.gov", "ttl_seconds": 60, "lifecycle": "stable"},
+        {"name": "parcel_owner", "source": "REGRID", "source_url": "https://regrid.com", "ttl_seconds": 60, "lifecycle": "stable"},
+    ])
+    client.meta_fields = lambda: asyncio.sleep(0, result=catalog)
+
+    plan = _run(service.project_intelligence_plan(snapshot["snapshot_id"]))
+    spend = _run(service.quote_refresh(snapshot["snapshot_id"], project_profile="data_center_siting"))
+
+    assert plan["profile"] == "data_center_siting"
+    assert plan["preset_fields"] == ["nearest_power_plant_sector", "slope_degrees"]
+    assert "parcel_owner" in plan["supplemental_fields"]
+    assert plan["known_gaps"][0]["requested_field"] == "site_deliverable_grid_capacity_mw"
+    assert spend["preset"] is None
+    assert spend["fetch_fields"] == sorted({
+        "nearest_power_plant_sector", "parcel_owner", "parcel_id", "parcel_boundary_geojson",
+        "parcel_match_type", "parcel_match_distance_m",
+    })
+    assert client.quote_calls[-1]["preset"] is None
+    assert snapshot["evidence"]["parcel_id"]["source_url"] == "https://example.test/source"
+
+
 def test_live_transport_failure_is_explicit(sandbox):
     service, client, _store = sandbox
 
@@ -240,6 +306,8 @@ def test_scene_loads_observed_parcel_geometry(sandbox):
     assert boundary["geometry"] == snapshot["geometry"]
     assert resolution_point["geometry"]["coordinates"] == [-97.0, 32.0]
     assert scene["proposed"][0]["attributes"]["capacity_mw"] == 100
+    assert scene["proposed"][0]["kind"] == "data_center_campus"
+    assert scene["render_contract"]["future_outputs"] == ["rgb", "depth", "semantic_segmentation", "proposed_geometry_metadata"]
 
 
 def test_proposed_scene_state_does_not_mutate_snapshot(sandbox):
@@ -265,3 +333,27 @@ def test_scene_state_is_deterministic_and_missing_snapshot_is_explicit(sandbox):
 
     with pytest.raises(SandboxError, match="SiteSnapshot not found"):
         service.scene_state("missing-snapshot")
+
+
+def test_sandbox_ui_uses_grounded_world_context_and_decision_oriented_campus():
+    root = Path(__file__).resolve().parents[1]
+    markup = (root / "app/static/sandbox.html").read_text(encoding="utf-8")
+    script = (root / "app/static/sandbox.js").read_text(encoding="utf-8")
+
+    assert 'id="feasibilityCards"' in markup
+    assert "100 MW AI Data Center" in markup
+    assert "Expansion target" in markup
+    assert "world-terrain-hillshade" in script
+    assert "world-roads-casing" in script
+    assert "world-buildings-extrusion" in script
+    assert "world-water-fill" in script
+    assert "world-land-cover-fill" in script
+    assert 'id="buildingsToggle"' in markup
+    assert "tile.openstreetmap.org" in script
+    assert "ensureWorld" in script
+    assert 'const requiredLayers = ["terrain", "roads"]' in script
+    assert "requiredLayers.every" in script
+    assert "componentGeometry" in script
+    assert "sandbox-proposed-surfaces" in script
+    assert '"fill-extrusion-color": "#e95920"' not in script
+    assert "evidence_ids" not in markup
