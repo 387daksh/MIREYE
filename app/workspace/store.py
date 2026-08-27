@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from app.config import WORKSPACE_DB
+from app.infrastructure.observability import span
 
 
 def _json_hash(value: Any) -> str:
@@ -26,16 +27,30 @@ def _json_hash(value: Any) -> str:
 class WorkspaceStore:
     def __init__(self, db_path: Path | str | None = None):
         self.db_path = Path(db_path or WORKSPACE_DB)
+        self._initialized = False
+        if db_path is not None:
+            self.initialize()
+
+    def initialize(self) -> None:
+        """Explicitly create/migrate storage; default stores stay inert on import."""
+        if self._initialized:
+            return
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self._init_db()
+        self._initialized = True
 
-    def _get_conn(self) -> sqlite3.Connection:
-        conn = sqlite3.connect(str(self.db_path))
+    def _get_conn(self) -> Any:
+        if not self._initialized:
+            raise RuntimeError("WorkspaceStore is not initialized. Call initialize() during application startup.")
+        with span("database.connect", **{"db.system": "sqlite"}):
+            conn = sqlite3.connect(str(self.db_path))
         conn.row_factory = sqlite3.Row
         return conn
 
     def _init_db(self) -> None:
-        with self._get_conn() as conn:
+        conn = sqlite3.connect(str(self.db_path))
+        conn.row_factory = sqlite3.Row
+        with conn:
             conn.executescript("""
                 CREATE TABLE IF NOT EXISTS workspaces (
                     workspace_id TEXT PRIMARY KEY,
@@ -209,6 +224,20 @@ class WorkspaceStore:
                     FOREIGN KEY (workspace_id) REFERENCES workspaces(workspace_id)
                 );
 
+                CREATE TABLE IF NOT EXISTS project_changes (
+                    change_id TEXT PRIMARY KEY,
+                    project_id TEXT NOT NULL,
+                    site_id TEXT NOT NULL,
+                    snapshot_before TEXT,
+                    snapshot_after TEXT,
+                    change_type TEXT NOT NULL,
+                    significance TEXT NOT NULL,
+                    source TEXT,
+                    detected_at REAL NOT NULL,
+                    state_json TEXT NOT NULL,
+                    FOREIGN KEY (project_id) REFERENCES diligence_projects(project_id)
+                );
+
                 CREATE INDEX IF NOT EXISTS idx_obs_ws_key ON observations(workspace_id, local_key);
                 CREATE INDEX IF NOT EXISTS idx_obs_ws_created ON observations(workspace_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_snapshots_workspace_created ON site_snapshots(workspace_id, created_at);
@@ -221,6 +250,8 @@ class WorkspaceStore:
                 CREATE INDEX IF NOT EXISTS idx_evaluation_runs_site_created ON scenario_evaluation_runs(site_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_world_snapshots_site_created ON world_snapshots(site_snapshot_id, created_at);
                 CREATE INDEX IF NOT EXISTS idx_diligence_projects_workspace_updated ON diligence_projects(workspace_id, updated_at);
+                CREATE INDEX IF NOT EXISTS idx_project_changes_project_detected ON project_changes(project_id, detected_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_project_changes_site_detected ON project_changes(site_id, detected_at DESC);
             """)
             scenario_columns = {row["name"] for row in conn.execute("PRAGMA table_info(scenario_versions)").fetchall()}
             if "world_snapshot_id" not in scenario_columns:
@@ -266,6 +297,44 @@ class WorkspaceStore:
             rows = conn.execute(
                 "SELECT state_json FROM diligence_projects WHERE workspace_id = ? ORDER BY updated_at DESC",
                 (workspace_id,),
+            ).fetchall()
+        return [json.loads(row["state_json"]) for row in rows]
+
+    def save_project_changes(self, changes: list[dict]) -> None:
+        if not changes:
+            return
+        with self._get_conn() as conn:
+            conn.executemany(
+                """
+                INSERT OR IGNORE INTO project_changes (
+                    change_id, project_id, site_id, snapshot_before, snapshot_after,
+                    change_type, significance, source, detected_at, state_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [(
+                    item["change_id"], item["project_id"], item["site_id"], item.get("snapshot_before"),
+                    item.get("snapshot_after"), item["semantic_change_type"], item["significance"],
+                    item.get("source"), item["detected_at"], json.dumps(item, sort_keys=True, separators=(",", ":")),
+                ) for item in changes],
+            )
+
+    def list_project_changes(
+        self, project_id: str, *, site_id: str | None = None, significance: str | None = None,
+        source: str | None = None, change_type: str | None = None, since: float | None = None,
+    ) -> list[dict]:
+        clauses: list[str] = ["project_id = ?"]
+        params: list[Any] = [project_id]
+        for column, value in (("site_id", site_id), ("significance", significance), ("source", source), ("change_type", change_type)):
+            if value is not None:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if since is not None:
+            clauses.append("detected_at >= ?")
+            params.append(float(since))
+        with self._get_conn() as conn:
+            rows = conn.execute(
+                f"SELECT state_json FROM project_changes WHERE {' AND '.join(clauses)} ORDER BY detected_at DESC, change_id",
+                params,
             ).fetchall()
         return [json.loads(row["state_json"]) for row in rows]
 

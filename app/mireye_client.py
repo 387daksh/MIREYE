@@ -20,6 +20,8 @@ import duckdb
 import httpx
 
 from app.config import DATA_MODE, MIREYE_API_KEY, MIREYE_BASE_URL, PARQUET_DIR
+from app.infrastructure.observability import record_provider_credits, span
+from app.ai.accounting import record_mireye
 
 logger = logging.getLogger(__name__)
 
@@ -82,10 +84,19 @@ class MireyeClient:
             "User-Agent": "Mireye-Agent-Platform/1.0",
         }
         url = f"{self.base_url}{path}"
-        async with httpx.AsyncClient(timeout=self.timeout) as client:
-            resp = await client.request(method, url, json=json_body, params=params, headers=headers)
-            resp.raise_for_status()
-            return resp.json()
+        with span("provider.mireye", **{"provider.name": "MIREYE", "http.request.method": method, "url.path": path}):
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                resp = await client.request(method, url, json=json_body, params=params, headers=headers)
+                resp.raise_for_status()
+                body = resp.json()
+        charged = body.get("credits_charged") or (body.get("usage") or {}).get("credits_charged")
+        if isinstance(charged, (int, float)):
+            record_provider_credits("MIREYE", charged, path)
+            record_mireye(charged=charged)
+        quoted = body.get("estimated_credits") or body.get("credits_estimated")
+        if path.endswith("/quote") and isinstance(quoted, (int, float)):
+            record_mireye(quoted=quoted)
+        return body
 
     # -------------------------------------------------------------------------
     # Local Simulation Engine (DuckDB + Parquet)
@@ -107,15 +118,17 @@ class MireyeClient:
                 """
             elif address:
                 # If address contains PCL-XXXXXX
-                df = con.execute(
+                cursor = con.execute(
                     f"""
                     SELECT * FROM '{PARQUET_FILE.as_posix()}'
                     WHERE parcel_id ILIKE ?
                     LIMIT 2
                     """,
                     [f"%{address.strip()}%"],
-                ).df()
-                if len(df) > 1:
+                )
+                columns = [item[0] for item in cursor.description]
+                rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+                if len(rows) > 1:
                     return {
                         "ok": False,
                         "error": {
@@ -127,20 +140,22 @@ class MireyeClient:
                                     "lat": float(r["lat"]),
                                     "lng": float(r["lon"]),
                                 }
-                                for r in df.to_dict(orient="records")
+                                for r in rows
                             ],
                         },
                     }
-                if df.empty:
+                if not rows:
                     return None
-                return df.to_dict(orient="records")[0]
+                return rows[0]
             else:
                 return None
 
-            df = con.execute(query).df()
-            if df.empty:
+            cursor = con.execute(query)
+            columns = [item[0] for item in cursor.description]
+            rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            if not rows:
                 return None
-            return df.to_dict(orient="records")[0]
+            return rows[0]
         finally:
             con.close()
 

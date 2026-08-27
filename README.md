@@ -63,16 +63,19 @@ Storage remains local and simple:
 ## Requirements
 
 - Python 3.10 or newer
+- `uv` 0.8.15 or newer
 - A MIREYE API key for live parcel intelligence
 - An OpenAI API key for live agent chat
 - Network access for MIREYE, OpenAI, USGS, Overture, and MapLibre assets
 
-Install dependencies:
+Create the locked environment:
 
 ```powershell
-python -m pip install fastapi uvicorn duckdb h3 httpx pydantic pytest python-dotenv shapely
-python -m pip install -r requirements-world.txt
+uv sync --frozen --extra world --group dev --group test
 ```
+
+`pyproject.toml` and `uv.lock` are the dependency source of truth. Existing
+global Python environments still work, but CI and Docker use the lockfile.
 
 The frontend is vanilla HTML, CSS, and JavaScript. MapLibre GL JS is loaded by the application page; React and Three.js are not used.
 
@@ -99,6 +102,14 @@ python -m uvicorn app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
 Open `http://127.0.0.1:8000/`.
+
+The containerized development foundation starts the API plus PostGIS, Redis,
+and MinIO. The application still uses SQLite and local artifacts until those
+repository adapters are migrated explicitly:
+
+```powershell
+docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+```
 
 For the shortest safe startup, use the included launcher. It creates a new temporary database and world-asset directory on every run:
 
@@ -194,12 +205,11 @@ The primary sandbox and diligence model is `gpt-5.6-sol` with high reasoning eff
 
 ## Tests
 
-Normal tests are offline and must use temporary SQLite storage:
+Normal tests are offline and configure temporary SQLite storage in
+`tests/conftest.py`:
 
 ```powershell
-$env:WORKSPACE_DB = Join-Path $env:TEMP ("mireye-tests-" + [guid]::NewGuid().ToString() + ".db")
-python -m pytest -q
-Remove-Item -LiteralPath $env:WORKSPACE_DB -Force -ErrorAction SilentlyContinue
+uv run pytest -q
 ```
 
 Focused agent and scenario tests:
@@ -230,6 +240,7 @@ Normal `pytest` does not call the live MIREYE API. See [docs/live-mireye.md](doc
 | Service | `/health`, `/v1/usage`, `/v1/meta/fields`, `/docs` |
 
 Interactive OpenAPI documentation is available at `http://127.0.0.1:8000/docs`.
+Export the contract with `uv run python scripts/export_openapi.py`.
 
 ## Current Limits
 
@@ -253,10 +264,19 @@ app/sandbox_agent.py        Constrained GPT-5.6 Sol tool loop
 app/sandbox_scenarios.py    Scenario persistence and comparison
 app/world.py                WorldSnapshot, USGS terrain, Overture roads
 app/workspace/store.py      Additive SQLite persistence
+app/domain/                 Dependency-free domain boundaries and ports
+app/application/            Use-case and workflow boundaries
+app/infrastructure/         Typed config, storage, events, telemetry, DB/queue boundaries
+app/adapters/               Provider adapter boundaries
+app/ai/                     Future AI orchestration contracts
 app/static/                 Product and sandbox UI
 scripts/                    Opt-in live integration/demo commands
 tests/                      Offline unit and integration coverage
 ```
+
+See [current and target architecture](docs/architecture-current.md) and the
+[frontend migration plan](docs/frontend-migration.md). PostgreSQL, S3, Temporal,
+and React are staged targets, not active product paths yet.
 
 ## License
 

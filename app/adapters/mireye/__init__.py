@@ -1,0 +1,1 @@
+"""MIREYE API adapter boundary."""

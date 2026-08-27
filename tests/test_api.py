@@ -2,22 +2,26 @@ import pytest
 from fastapi.testclient import TestClient
 from app.main import app
 
-client = TestClient(app)
+
+@pytest.fixture(scope="module")
+def client():
+    with TestClient(app) as value:
+        yield value
 
 
-def test_root_dashboard():
+def test_root_dashboard(client):
     response = client.get("/")
     assert response.status_code == 200
     assert "Mireye" in response.text
 
 
-def test_health_check():
+def test_health_check(client):
     response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["status"] == "healthy"
 
 
-def test_meta_fields():
+def test_meta_fields(client):
     response = client.get("/v1/meta/fields")
     assert response.status_code == 200
     data = response.json()
@@ -25,7 +29,7 @@ def test_meta_fields():
     assert len(data["fields"]) > 0
 
 
-def test_screen_parcels():
+def test_screen_parcels(client):
     payload = {
         "min_acreage": 20.0,
         "max_slope_pct": 15.0,
@@ -41,7 +45,7 @@ def test_screen_parcels():
         assert "confidence_score" in data["shortlist"][0]
 
 
-def test_ask_parcel():
+def test_ask_parcel(client):
     payload = {
         "lat": 32.5,
         "lng": -97.0,
@@ -55,7 +59,7 @@ def test_ask_parcel():
     assert data["dossier"]["ok"] is True
 
 
-def test_grid_capacity():
+def test_grid_capacity(client):
     response = client.get("/v1/grid?lat=32.5&lng=-97.0&target_capacity_mw=75.0")
     assert response.status_code == 200
     data = response.json()
@@ -63,7 +67,7 @@ def test_grid_capacity():
     assert "feasibility" in data
 
 
-def test_workspace_lifecycle():
+def test_workspace_lifecycle(client):
     import time
     ws_id = f"ws_api_test_{int(time.time() * 1000)}"
 

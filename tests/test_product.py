@@ -122,21 +122,20 @@ def test_ambiguous_property_requires_one_explicit_choice(tmp_path):
 def test_product_api_and_primary_pages_use_product_language(tmp_path, monkeypatch):
     service, _client = _service(tmp_path)
     monkeypatch.setattr(main, "product_service", service)
-    client = TestClient(main.app)
+    with TestClient(main.app) as client:
+        response = client.post("/v1/product/requests", json={"message": "Find a site in Texas"})
+        assert response.status_code == 200
+        assert response.json()["status"] == "DISCOVERY_UNAVAILABLE"
 
-    response = client.post("/v1/product/requests", json={"message": "Find a site in Texas"})
-    assert response.status_code == 200
-    assert response.json()["status"] == "DISCOVERY_UNAVAILABLE"
-
-    home = client.get("/").text
-    sandbox = client.get("/sandbox/example").text
-    assert "What are you looking for?" in home
-    assert "/v1/screen" not in home
-    assert "DuckDB" not in home
-    assert "SiteSnapshot" not in home
-    assert "Ask about this site" in sandbox
-    assert "View sources" in sandbox
-    assert "tool trace" not in sandbox.lower()
-    assert "evidence id" not in sandbox.lower()
-    assert "Analyze a real property" in home
-    assert "propertyHandoff" in client.get("/static/app.js").text
+        home = client.get("/").text
+        sandbox = client.get("/sandbox/example").text
+        assert "What are you looking for?" in home
+        assert "/v1/screen" not in home
+        assert "DuckDB" not in home
+        assert "SiteSnapshot" not in home
+        assert "Ask about this site" in sandbox
+        assert "View sources" in sandbox
+        assert "tool trace" not in sandbox.lower()
+        assert "evidence id" not in sandbox.lower()
+        assert "Analyze a real property" in home
+        assert "propertyHandoff" in client.get("/static/app.js").text

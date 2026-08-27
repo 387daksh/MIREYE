@@ -113,6 +113,28 @@
       </div>
 
       <div class="results" id="results" hidden>
+        <section class="project-intelligence" id="projectIntelligence" hidden aria-labelledby="projectIntelligenceTitle">
+          <div class="intelligence-heading">
+            <div><p class="section-kicker">Project intelligence</p><h2 id="projectIntelligenceTitle">What should happen next</h2></div>
+            <strong class="readiness-state" id="projectReadinessState"></strong>
+          </div>
+          <div class="readiness-grid" id="projectReadiness"></div>
+          <section class="project-changes" id="projectChanges" hidden>
+            <div class="module-heading"><h3>What changed</h3><strong id="projectChangeCount"></strong></div>
+            <p id="projectChangeSummary"></p>
+            <div id="projectChangeList"></div>
+          </section>
+          <div class="readiness-modules">
+            <section aria-labelledby="powerReadinessTitle"><div class="module-heading"><h3 id="powerReadinessTitle">Power readiness</h3><strong id="powerReadinessState"></strong></div><div id="powerReadiness"></div></section>
+            <section aria-labelledby="entitlementTitle"><div class="module-heading"><h3 id="entitlementTitle">Entitlement</h3><strong id="entitlementState"></strong></div><div id="entitlementReadiness"></div></section>
+          </div>
+          <div class="intelligence-columns">
+            <section><h3>What we know</h3><div id="projectKnown"></div></section>
+            <section><h3>What is blocking</h3><div id="projectBlockers"></div></section>
+            <section><h3>What should happen next</h3><ol id="projectActions"></ol></section>
+          </div>
+          <section class="rfi-preview" id="projectRfis" hidden><h3>Request drafts</h3><div id="projectRfiList"></div></section>
+        </section>
         <div class="results-heading">
           <div><p class="section-kicker">Verified property</p><h2>Candidate sites</h2></div>
           <label class="sort-control">Sort <select aria-label="Sort candidates"><option>Deterministic order</option></select></label>

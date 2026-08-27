@@ -98,11 +98,12 @@ class SpatialDiscovery:
 
         con = duckdb.connect()
         try:
-            df = con.execute(query, params).df()
-            if df.empty:
+            cursor = con.execute(query, params)
+            columns = [item[0] for item in cursor.description]
+            records = [dict(zip(columns, row)) for row in cursor.fetchall()]
+            if not records:
                 return []
 
-            records = df.to_dict(orient="records")
             formatted = []
             for r in records:
                 # Structure matching Mireye candidate dictionary with fields

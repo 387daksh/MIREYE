@@ -1,0 +1,12 @@
+.git
+.venv
+.pytest_cache
+.mypy_cache
+.ruff_cache
+__pycache__
+*.pyc
+*.db
+.env
+app/data/world-assets
+docs/screenshots
+debug.log

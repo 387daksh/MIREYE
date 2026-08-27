@@ -12,10 +12,15 @@ from datetime import datetime, timezone
 from typing import Any, Protocol
 
 from app.config import MIREYE_ENRICHMENT_BATCH_SIZE
+from app.infrastructure.observability import traced_async
 from app.product import compile_request
+from app.project_changes import changes_from_refresh, changes_from_world_refresh
+from app.project_intelligence import RFI_ACTION_TYPES, build_project_intelligence
+from app.project_readiness import AuthoritativeSourceService, build_entitlement_state, build_power_readiness
 from app.sandbox import ConfirmationRequired, SandboxError, SiteSnapshotService, scene_state_from_snapshot
 from app.sandbox_evaluator import SceneValidationError, evaluate_site
 from app.workspace.store import WorkspaceStore
+from app.world import WorldError
 
 
 MAX_CANDIDATES = 500
@@ -53,11 +58,22 @@ CONSTRAINT_FIELDS = {
     "road_proximity": ("nearest_major_road_distance_m", "nearest_major_road_name"),
     "parcel_zoning_code_in": ("parcel_zoning",),
     "industrial_zoning": ("parcel_zoning",),
+    "data_center_entitlement": ("parcel_zoning", "political_county", "political_locality", "political_region"),
     "zoning_context": ("parcel_zoning",),
     "sufficient_grid_capacity": (
         "nearest_substation_distance_m", "nearest_substation_status", "nearest_substation_max_voltage_kv",
         "nearest_transmission_line_distance_m", "nearest_transmission_line_voltage_kv",
+        "nearest_transmission_line_voltage_class", "nearest_transmission_line_voltage_basis",
+        "nearest_transmission_line_status", "nearest_transmission_line_owner",
+        "max_transmission_line_voltage_kv_within_radius", "max_transmission_line_voltage_class_within_radius",
+        "nearest_osm_transmission_line_distance_m", "nearest_osm_transmission_line_voltage_kv",
+        "nearest_osm_substation_distance_m", "nearest_osm_substation_max_voltage_kv",
+        "electric_utility_service_territory", "iso_rto", "interconnection_queue_active_capacity_county_mw",
+        "interconnection_queue_active_capacity_ercot_mw",
+        "transmission_redundancy_flag",
     ),
+    "water_capacity": ("within_water_service_area", "water_system_name", "water_service_area_provenance"),
+    "fiber_diversity": ("fiber_broadband_available", "fiber_provider_count"),
 }
 SUPPORTED_CONSTRAINTS = {
     "parcel_acreage_range", "resolution_point_outside_fema_sfha",
@@ -161,11 +177,39 @@ CONSTRAINT_CAPABILITIES = {
         "evaluator_support": "UNRESOLVED_ONLY", "unsupported_semantics": ["raw codes do not establish industrial use"],
         "confirmation_mandatory": False, "assumption_allowed": False,
     },
+    "data_center_entitlement": {
+        "semantic_description": "Request a jurisdiction-specific data-center permitted-use and approval-path determination.",
+        "input_schema": {"required": [], "properties": {}},
+        "evidence_fields": list(CONSTRAINT_FIELDS["data_center_entitlement"]), "spatial_scope": "SITE",
+        "evaluator_support": "UNRESOLVED_ONLY",
+        "unsupported_semantics": ["raw zoning and postal locality do not establish permitted use or entitlement"],
+        "confirmation_mandatory": False, "assumption_allowed": False,
+    },
     "legal_access": {
         "semantic_description": "Request legal access, frontage, or right-of-way proof.",
         "input_schema": {"required": [], "properties": {}}, "evidence_fields": list(CONSTRAINT_FIELDS["legal_access"]),
         "spatial_scope": "PARCEL", "evaluator_support": "UNRESOLVED_ONLY",
         "unsupported_semantics": ["mapped-road proximity does not prove legal access"], "confirmation_mandatory": False, "assumption_allowed": False,
+    },
+    "sufficient_grid_capacity": {
+        "semantic_description": "Request utility-confirmed grid capacity or deliverability.",
+        "input_schema": {"required": [], "properties": {}},
+        "evidence_fields": list(CONSTRAINT_FIELDS["sufficient_grid_capacity"]), "spatial_scope": "SITE",
+        "evaluator_support": "UNRESOLVED_ONLY",
+        "unsupported_semantics": ["proximity, voltage, status, and queue context do not prove deliverability"],
+        "confirmation_mandatory": False, "assumption_allowed": False,
+    },
+    "water_capacity": {
+        "semantic_description": "Request provider-confirmed water service capacity.",
+        "input_schema": {"required": [], "properties": {}}, "evidence_fields": list(CONSTRAINT_FIELDS["water_capacity"]), "spatial_scope": "POINT",
+        "evaluator_support": "UNRESOLVED_ONLY", "unsupported_semantics": ["current evidence does not prove provider capacity"],
+        "confirmation_mandatory": False, "assumption_allowed": False,
+    },
+    "fiber_diversity": {
+        "semantic_description": "Request carrier-confirmed physically diverse fiber routes.",
+        "input_schema": {"required": [], "properties": {}}, "evidence_fields": list(CONSTRAINT_FIELDS["fiber_diversity"]), "spatial_scope": "POINT",
+        "evaluator_support": "UNRESOLVED_ONLY", "unsupported_semantics": ["proximity or provider counts do not prove route diversity"],
+        "confirmation_mandatory": False, "assumption_allowed": False,
     },
 }
 REQUIREMENT_GAP_TARGETS = {
@@ -198,7 +242,8 @@ def _material_address_difference(submitted: str | None, canonical: str | None) -
     if not submitted or not canonical or not re.search(r"\d", submitted):
         return False
     aliases = {"street": "st", "road": "rd", "drive": "dr", "avenue": "ave", "boulevard": "blvd", "highway": "hwy"}
-    normalize = lambda value: [aliases.get(token, token) for token in re.findall(r"[a-z0-9]+", value.casefold())]
+    def normalize(value: str) -> list[str]:
+        return [aliases.get(token, token) for token in re.findall(r"[a-z0-9]+", value.casefold())]
     submitted_tokens, canonical_tokens = normalize(submitted), normalize(canonical)
     submitted_numbers = [token for token in submitted_tokens if token.isdigit()]
     canonical_numbers = [token for token in canonical_tokens if token.isdigit()]
@@ -469,6 +514,15 @@ def compile_project_request(message: str) -> dict:
         allowed = [value.strip().upper() for value in re.split(r"\s*(?:,|or)\s*", zoning_codes.group(1)) if value.strip() and value.strip().casefold() not in {"and", "with", "for"}]
         constraints = [item for item in constraints if item["constraint_id"] != "industrial_zoning"]
         constraints.append({"constraint_id": "parcel_zoning_code_in", "allowed_codes": allowed})
+    if any(phrase in lower for phrase in ("water capacity", "water availability", "water service capacity")):
+        constraints.append({"constraint_id": "water_capacity"})
+    if any(phrase in lower for phrase in ("fiber diversity", "diverse fiber", "redundant fiber routes")):
+        constraints.append({"constraint_id": "fiber_diversity"})
+    if compiled.get("project") == "Data center" and isinstance(compiled.get("capacity_mw"), (int, float)):
+        if not any(item["constraint_id"] == "sufficient_grid_capacity" for item in constraints):
+            constraints.append({"constraint_id": "sufficient_grid_capacity"})
+        if not any(item["constraint_id"] in {"data_center_entitlement", "industrial_zoning"} for item in constraints):
+            constraints.append({"constraint_id": "data_center_entitlement"})
     requested_context = (
         ("land_size_context", "land size" in lower or "acreage" in lower, {"parcel_acreage_range"}),
         ("wetland_context", "wetland" in lower, {"max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel"}),
@@ -484,6 +538,11 @@ def compile_project_request(message: str) -> dict:
         if item not in deduped:
             deduped.append(item)
     deduped, requirement_gaps, assumptions_permitted = _requirement_gaps(deduped, text)
+    expansion = re.search(r"(?:expand(?:able)?\s+(?:to|target)|expansion(?:\s+target)?(?:\s+of|\s*:)?)[^\d]{0,20}(\d+(?:\.\d+)?)\s*mw", lower)
+    energization = re.search(r"(?:target\s+)?energization\s+date\s*[:=]?\s*(\d{4}-\d{2}-\d{2})", lower)
+    reliability = next((value for phrase, value in (("n+1", "N+1"), ("n+2", "N+2"), ("tier iv", "Tier IV"), ("tier iii", "Tier III")) if phrase in lower), None)
+    redundancy = next((value for phrase, value in (("dual feed", "dual feed"), ("two independent feeds", "two independent feeds"), ("redundant feed", "redundant feed")) if phrase in lower), None)
+    load_profile = [value for phrase, value in (("24/7", "24/7"), ("24x7", "24/7"), ("constant load", "constant load")) if phrase in lower]
     return {
         **compiled,
         "constraints": deduped,
@@ -492,14 +551,22 @@ def compile_project_request(message: str) -> dict:
         "requirement_status": "REVIEW_REQUIRED" if requirement_gaps else "READY",
         "requirement_gaps": requirement_gaps,
         "assumptions_permitted": assumptions_permitted,
+        "power_requirements": {
+            "phase_1_mw": compiled.get("capacity_mw"),
+            "expansion_mw": float(expansion.group(1)) if expansion else None,
+            "target_energization_date": energization.group(1) if energization else None,
+            "reliability_requirement": reliability, "redundancy_requirement": redundancy,
+            "load_profile_characteristics": list(dict.fromkeys(load_profile)),
+        },
         "compiler_version": "diligence_constraints_v3",
     }
 
 
 class DiligenceService:
-    def __init__(self, store: WorkspaceStore, sandbox: SiteSnapshotService, worlds: Any | None = None, provider: CandidateProvider | None = None):
+    def __init__(self, store: WorkspaceStore, sandbox: SiteSnapshotService, worlds: Any | None = None, provider: CandidateProvider | None = None, sources: AuthoritativeSourceService | None = None):
         self.store, self.sandbox, self.worlds = store, sandbox, worlds
         self.provider = provider or UserSuppliedCandidateProvider()
+        self.sources = sources
 
     def create_project(self, *, workspace_id: str, message: str, candidates: list[Any]) -> dict:
         if not isinstance(message, str) or not message.strip():
@@ -511,14 +578,23 @@ class DiligenceService:
             "project_id": f"project_{uuid.uuid4().hex}", "workspace_id": workspace_id,
             "status": "CANDIDATES_SUPPLIED", "request": request,
             "candidates": page["items"], "candidate_count": page["total"], "requested_fields": [],
-            "spend_plan": None, "ranking": [],
+            "evidence_plan": None, "spend_plan": None, "metered_operations": [], "ranking": [],
             "decision": self._decision(request, []),
             "agent_state": {"status": "RUNNING", "step": "requirement_planning", "resume_count": 0, "transitions": [{"status": "RUNNING", "at": now}]},
             "active_decision": None, "decision_history": [], "assumptions": [],
-            "watch": {"enabled": False, "last_checked_at": None, "candidate_states": []},
+            "active_candidate_id": None, "project_intelligence": None, "rfis": [],
+            "external_evidence_by_site": {}, "power_readiness_by_site": {}, "entitlement_by_site": {},
+            "watch": {
+                "watch_id": f"watch_{uuid.uuid4().hex}", "project_id": None, "site_id": None,
+                "source": "MIREYE", "fields": [], "layers": [], "cadence_policy": "MANUAL",
+                "last_checked_at": None, "last_known_state": None, "candidate_states": [],
+                "enabled": False, "cost_policy": {"metered_refresh": "EXPLICIT_CONFIRMATION_REQUIRED"},
+            },
             "created_at": now, "updated_at": now,
         }
+        project["watch"]["project_id"] = project["project_id"]
         self.store.create_workspace(workspace_id, "Site diligence")
+        self._update_project_intelligence(project)
         return self._save(project)
 
     def get(self, project_id: str) -> dict:
@@ -561,6 +637,8 @@ class DiligenceService:
             "candidate_context": {"count": project["candidate_count"], "states": [item["reconciliation_status"] for item in project["candidates"]]},
             "workflow": copy.deepcopy(project["agent_state"]),
             "spend_plan": copy.deepcopy(project.get("spend_plan")),
+            "project_intelligence": copy.deepcopy(project.get("project_intelligence")),
+            "recent_changes": self.changes(project_id, limit=10)["items"],
         }
 
     def agent_decision(
@@ -591,8 +669,15 @@ class DiligenceService:
             raise DiligenceError("Unknown agent decision mode.")
         if mode == "HARD_BLOCK":
             raise DiligenceError("Only the application can create a hard-block DecisionRequest.")
-        specification, gap_ids = _validate_model_decision(decision_request, gaps)
-        decision = self._interrupt(project, specification, {"type": "requirement", "gap_ids": gap_ids})
+        try:
+            specification, gap_ids = _validate_model_decision(decision_request, gaps)
+            resume_action = {"type": "requirement", "gap_ids": gap_ids}
+        except DiligenceError:
+            fallback = self._canonical_action_decision(project, decision_request)
+            if fallback is None:
+                raise
+            specification, resume_action = fallback
+        decision = self._interrupt(project, specification, resume_action)
         self._save(project)
         return {"mode": mode, "interrupted": True, "decision_request": decision}
 
@@ -641,8 +726,89 @@ class DiligenceService:
             self._save(project)
             return await self.confirm_and_fetch(project_id, plan["spend_plan_id"], confirmed=True)
         if action["type"] == "confirm_address":
+            self._save(project)
             return self.confirm_canonical_address(project_id, action["candidate_id"], confirmed=selected_options[0]["id"] == "confirm")
+        if action["type"] == "project_action":
+            selected = selected_options[0]
+            project.setdefault("action_decisions", []).append({
+                "decision_id": decision_id,
+                "gap_id": action["gap_id"],
+                "action_id": action["action_id"],
+                "selection": selected["id"],
+                "status": "AUTHORIZED" if selected.get("action") == "authorize" else "DEFERRED",
+                "created_at": time.time(),
+            })
+            project["status"] = (project.get("decision") or {}).get("status", "NO_DECISION_YET")
+            return self._save(project)
         raise DiligenceError("The decision resume action is unsupported.")
+
+    def _canonical_action_decision(self, project: dict, proposal: Any) -> tuple[dict, dict] | None:
+        """Map model interaction text onto an application-owned EvidenceGap action."""
+        if not isinstance(proposal, dict) or not isinstance(proposal.get("constraint_targets"), list):
+            return None
+        targets = list(dict.fromkeys(proposal["constraint_targets"]))
+        if not targets or any(not isinstance(target, str) for target in targets):
+            return None
+        targets = [target for target in targets if target in CONSTRAINT_CAPABILITIES]
+        if not targets:
+            return None
+        if any(
+            value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 1200)
+            for value in (proposal.get("question"), proposal.get("context"), proposal.get("why_it_matters"))
+        ):
+            return None
+        self._update_project_intelligence(project)
+        intelligence = project.get("project_intelligence") or {}
+        gaps = [
+            gap for gap in intelligence.get("evidence_gaps", [])
+            if gap.get("status") != "RESOLVED" and gap.get("requirement_id") in targets
+        ]
+        if not gaps:
+            return None
+        for gap in gaps:
+            capability = CONSTRAINT_CAPABILITIES[gap["requirement_id"]]
+            if not capability.get("evaluator_support"):
+                return None
+            expected_scope = str(capability.get("spatial_scope") or "").upper()
+            actual_scope = str(gap.get("evidence_scope") or "").upper()
+            if expected_scope and actual_scope and expected_scope != actual_scope:
+                return None
+        actions = [
+            action for action in intelligence.get("recommended_actions", [])
+            if action.get("gap_id") in {gap["gap_id"] for gap in gaps}
+        ]
+        if not actions:
+            return None
+        action = actions[0]
+        gap = next(item for item in gaps if item["gap_id"] == action["gap_id"])
+        action_label = "Generate utility RFI" if action.get("type") in RFI_ACTION_TYPES else "Prepare next evidence action"
+        specification = {
+            "kind": "clarification",
+            "question": proposal.get("question") or f"How should MIREYE proceed with {gap['title']}?",
+            "context": proposal.get("context") or gap["description"],
+            "why_it_matters": proposal.get("why_it_matters") or gap["why_it_matters"],
+            "risk_level": proposal.get("risk_level") if proposal.get("risk_level") in {"LOW", "MEDIUM", "HIGH"} else {"CRITICAL": "HIGH"}.get(gap["impact"], gap["impact"]),
+            "blocking": False,
+            "input_mode": "single_choice",
+            "options": [
+                {
+                    "id": "authorize_next_action", "label": action_label,
+                    "description": action["title"], "value": None,
+                    "consequence": "Record authorization to pursue the canonical missing evidence.", "action": "authorize",
+                },
+                {
+                    "id": "keep_unresolved", "label": "Keep unresolved and continue",
+                    "description": "Continue screening without treating the missing evidence as proven.", "value": None,
+                    "consequence": f"{gap['title']} remains unresolved.", "action": "defer",
+                },
+            ],
+            "recommended_option_id": "authorize_next_action",
+            "allow_custom": False,
+            "custom_schema": None,
+            "constraint_targets": [gap["requirement_id"]],
+            "originating_step": "project_intelligence",
+        }
+        return specification, {"type": "project_action", "gap_id": gap["gap_id"], "action_id": action["action_id"]}
 
     def plan_fields(self, project_id: str) -> dict:
         project = self.get(project_id)
@@ -653,7 +819,151 @@ class DiligenceService:
         self._save(project)
         return {"project_id": project_id, "fields": project["requested_fields"], "field_count": len(project["requested_fields"]), "constraints": project["request"]["constraints"]}
 
-    async def resolve_and_quote(self, project_id: str, *, confirmed_resolution: bool) -> dict:
+    async def plan_project_evidence(self, project_id: str, *, requested_decision: str = "candidate_screening") -> dict:
+        project = self.get(project_id)
+        snapshot_id = next((item.get("snapshot_id") for item in project["candidates"] if item.get("snapshot_id")), None)
+        plan = await self.sandbox.catalog_evidence_plan(
+            project_type=project["request"].get("project") or "Site analysis",
+            requirements=project["request"].get("constraints", []),
+            unresolved_gaps=(project.get("project_intelligence") or {}).get("evidence_gaps", []),
+            requested_decision=requested_decision,
+            snapshot_id=snapshot_id,
+        )
+        project["evidence_plan"] = plan
+        project["requested_fields"] = plan["fields"]
+        self._save(project)
+        return copy.deepcopy(plan)
+
+    def evaluate_evidence_coverage(self, project_id: str) -> dict:
+        project = self.get(project_id)
+        self._update_project_intelligence(project)
+        self._save(project)
+        return copy.deepcopy(project["project_intelligence"])
+
+    def next_actions(self, project_id: str) -> dict:
+        intelligence = self.evaluate_evidence_coverage(project_id)
+        return {
+            "project_id": project_id, "prioritized_actions": intelligence["recommended_actions"],
+            "project_readiness_state": intelligence["project_readiness_state"],
+            "critical_blockers": intelligence["risk_state"]["critical_blockers"],
+            "ranking_version": "project_next_action_priority_v1",
+        }
+
+    async def refresh_authoritative_sources(self, project_id: str, site_id: str) -> dict:
+        project = self.get(project_id)
+        candidate = next((item for item in project["candidates"] if item.get("site_id") == site_id and item.get("snapshot_id")), None)
+        if candidate is None:
+            raise DiligenceError("The requested site is not an enriched candidate in this project.")
+        snapshot = self.store.get_site_snapshot(candidate["snapshot_id"])
+        if snapshot is None:
+            raise DiligenceError("The candidate SiteSnapshot is unavailable.")
+        if self.sources is None:
+            external = {
+                "site_id": site_id, "collected_at": time.time(), "records": [],
+                "sources": [{"provider": "Authoritative public sources", "availability": "UNAVAILABLE", "reason": "No authoritative source adapter is configured."}],
+            }
+        else:
+            external = await self.sources.collect(project, snapshot)
+        project.setdefault("external_evidence_by_site", {})[site_id] = external
+        self._build_site_readiness(project, candidate)
+        self._update_project_intelligence(project)
+        self._save(project)
+        return {
+            "project_id": project_id, "site_id": site_id, "source_result": copy.deepcopy(external),
+            "power_readiness": copy.deepcopy(project["power_readiness_by_site"][site_id]),
+            "entitlement": copy.deepcopy(project["entitlement_by_site"][site_id]),
+        }
+
+    def power_readiness(self, project_id: str, site_id: str) -> dict:
+        project = self.get(project_id)
+        candidate = self._site_candidate(project, site_id)
+        self._build_site_readiness(project, candidate)
+        self._save(project)
+        return copy.deepcopy(project.get("power_readiness_by_site", {}).get(site_id))
+
+    def entitlement_state(self, project_id: str, site_id: str) -> dict:
+        project = self.get(project_id)
+        candidate = self._site_candidate(project, site_id)
+        self._build_site_readiness(project, candidate)
+        self._save(project)
+        return copy.deepcopy(project.get("entitlement_by_site", {}).get(site_id))
+
+    def create_rfi_draft(self, project_id: str, action_id: str, generated_request: str) -> dict:
+        project = self.get(project_id)
+        self._update_project_intelligence(project)
+        action = next((item for item in project["project_intelligence"]["recommended_actions"] if item["action_id"] == action_id), None)
+        if action is None or action["type"] not in RFI_ACTION_TYPES:
+            raise DiligenceError("This next action does not support an RFI draft.")
+        if not isinstance(generated_request, str) or not 40 <= len(generated_request.strip()) <= 8000:
+            raise DiligenceError("The generated RFI must be a substantive request of at most 8,000 characters.")
+        draft = {
+            "rfi_id": f"rfi_{uuid.uuid4().hex}", "action_id": action_id, "type": action["type"],
+            "recipient_category": action["recipient_category"], "project_id": project_id, "site_id": action["site_id"],
+            "required_evidence": copy.deepcopy(action["required_evidence"]),
+            "generated_request": generated_request.strip(), "dependencies": copy.deepcopy(action["dependencies"]),
+            "structured_context": self._rfi_context(project, action),
+            "status": "DRAFT", "human_approval_required": True, "created_at": time.time(),
+        }
+        project.setdefault("rfis", []).append(draft)
+        for item in project["project_intelligence"]["recommended_actions"]:
+            if item["action_id"] == action_id:
+                item["status"] = "DRAFTED"
+                item["rfi_id"] = draft["rfi_id"]
+        self._save(project)
+        return copy.deepcopy(draft)
+
+    @staticmethod
+    def _find_metered_operation(project: dict, operation_type: str, request: dict) -> dict | None:
+        request_hash = hashlib.sha256(_canonical(request).encode("utf-8")).hexdigest()
+        return next(
+            (
+                item for item in reversed(project.get("metered_operations", []))
+                if item.get("operation_type") == operation_type and item.get("request_hash") == request_hash
+            ),
+            None,
+        )
+
+    def _begin_metered_operation(
+        self,
+        project: dict,
+        operation_type: str,
+        request: dict,
+        *,
+        confirmed: bool,
+        retry_reason: str | None,
+        status: str = "EXECUTING",
+    ) -> dict:
+        existing = self._find_metered_operation(project, operation_type, request)
+        if existing and existing.get("status") == "SUCCEEDED":
+            return existing
+        if existing:
+            if existing.get("status") == "QUOTED":
+                return existing
+            if existing.get("status") == "EXECUTING":
+                raise DiligenceError("An equivalent paid operation is already executing; duplicate execution was blocked.")
+            if not retry_reason or len(retry_reason.strip()) < 8:
+                raise DiligenceError("Retrying a failed paid operation requires an explicit reason.")
+            if int(existing.get("attempts", 1)) >= 2:
+                raise DiligenceError("The paid operation retry limit has been reached.")
+            existing.update(
+                status=status, attempts=int(existing.get("attempts", 1)) + 1,
+                retry_reason=retry_reason.strip(), started_at=time.time(), completed_at=None, error=None,
+            )
+            return existing
+        request_hash = hashlib.sha256(_canonical(request).encode("utf-8")).hexdigest()
+        operation = {
+            "operation_id": f"mop_{request_hash[:24]}", "operation_type": operation_type,
+            "request_hash": request_hash, "request": copy.deepcopy(request), "project_id": project["project_id"],
+            "run_id": None, "task_id": None, "status": status, "attempts": 1,
+            "quote": None, "quoted_credits": "UNKNOWN", "charged_credits": "UNKNOWN",
+            "confirmation_required": True, "confirmed_at": time.time() if confirmed else None,
+            "provider_request_ids": [], "result": None, "error": None,
+            "started_at": time.time(), "completed_at": None,
+        }
+        project.setdefault("metered_operations", []).append(operation)
+        return operation
+
+    async def resolve_and_quote(self, project_id: str, *, confirmed_resolution: bool, retry_reason: str | None = None) -> dict:
         project = self.get(project_id)
         if project["request"]["requirement_status"] != "READY":
             project["status"] = "NEEDS_USER_DECISION"
@@ -661,13 +971,29 @@ class DiligenceService:
             return self._save(project)
         if not confirmed_resolution:
             raise ConfirmationRequired("Candidate resolution requires explicit application confirmation.")
-        fields = self.plan_fields(project_id)["fields"]
+        evidence_plan = await self.plan_project_evidence(project_id)
+        planned_fields = self.plan_fields(project_id)["fields"]
+        project = self.get(project_id)
+        fields = planned_fields
         for candidate in project["candidates"]:
             if candidate["reconciliation_status"] == "ENRICHMENT_FAILED" and candidate.get("selected_location"):
+                if not retry_reason or len(retry_reason.strip()) < 8:
+                    raise DiligenceError("Retrying a failed paid operation requires an explicit reason.")
                 candidate.update(reconciliation_status="RESOLVED", error=None)
                 continue
             if candidate["reconciliation_status"] in {"UNSUPPORTED", "AMBIGUOUS", "RESOLVED", "ENRICHED"}:
                 continue
+            request = {
+                "candidate_id": candidate["candidate_id"], "input_type": candidate["input_type"],
+                "value": candidate.get("coordinate") or candidate.get("apn") or candidate.get("address"),
+            }
+            operation = self._begin_metered_operation(
+                project, "MIREYE_RESOLVE", request, confirmed=True, retry_reason=retry_reason,
+            )
+            if operation["status"] == "SUCCEEDED":
+                candidate.update(copy.deepcopy(operation["result"]))
+                continue
+            self._save(project)
             try:
                 if candidate["input_type"] == "coordinate":
                     resolved = await self.sandbox.resolve(**candidate["coordinate"])
@@ -682,17 +1008,42 @@ class DiligenceService:
                     candidate["reconciliation_status"] = "AMBIGUOUS"
                 else:
                     candidate["reconciliation_status"], candidate["error"] = "NOT_FOUND", "MIREYE could not resolve this candidate."
+                operation.update(
+                    status="SUCCEEDED", result={
+                        key: copy.deepcopy(candidate.get(key))
+                        for key in ("selected_location", "resolution_options", "reconciliation_status", "error")
+                    }, completed_at=time.time(),
+                )
             except Exception as exc:
                 candidate["reconciliation_status"], candidate["error"] = "ERROR", str(exc)
+                operation.update(status="FAILED", error=str(exc), completed_at=time.time())
+            self._save(project)
         resolved_candidates = [item for item in project["candidates"] if item["reconciliation_status"] == "RESOLVED"]
         if not resolved_candidates:
             project["status"] = "RESOLUTION_REQUIRED"
             return self._save(project)
         selected_fields, catalog = await self.sandbox.select_fields(fields)
+        preset = None
+        fetch_fields = selected_fields
+        operation_request = {
+            "candidate_ids": [item["candidate_id"] for item in resolved_candidates],
+            "locations": [
+                {"lat": item["selected_location"]["lat"], "lng": item["selected_location"]["lng"]}
+                for item in resolved_candidates
+            ],
+            "fields": fetch_fields, "preset": preset,
+        }
+        existing = self._find_metered_operation(project, "MIREYE_FETCH", operation_request)
+        if existing and existing["status"] == "SUCCEEDED":
+            return self._save(project)
+        if existing and existing["status"] == "QUOTED" and project.get("spend_plan", {}).get("operation_id") == existing["operation_id"]:
+            return self._save(project)
+        if existing and existing["status"] in {"FAILED", "PARTIAL"} and (not retry_reason or len(retry_reason.strip()) < 8):
+            raise DiligenceError("Retrying a failed paid operation requires an explicit reason.")
         provider_quotes, estimates = [], []
         for offset in range(0, len(resolved_candidates), BATCH_SIZE):
             count = len(resolved_candidates[offset:offset + BATCH_SIZE])
-            quote = await self.sandbox.client.fetch_quote(locations=count, fields=selected_fields)
+            quote = await self.sandbox.client.fetch_quote(locations=count, fields=fetch_fields or None, preset=preset)
             provider_quotes.append({"location_count": count, "quote": quote})
             credits = self.sandbox._estimated_credits(quote)
             if isinstance(credits, (int, float)):
@@ -702,16 +1053,26 @@ class DiligenceService:
         plan = {
             "spend_plan_id": f"spend_{uuid.uuid4().hex}", "project_id": project_id,
             "status": "QUOTED", "requested_fields": selected_fields,
+            "fetch_fields": fetch_fields, "preset": preset,
+            "field_manifest": [item for item in evidence_plan["field_manifest"] if item["field"] in selected_fields],
             "candidate_count": len(resolved_candidates), "batch_strategy": {"max_batch_size": BATCH_SIZE, "batch_count": len(provider_quotes)},
             "provider_quotes": provider_quotes, "expected_credits": sum(estimates) if len(estimates) == len(provider_quotes) else None,
             "provider_quote_ids": [item["quote"].get("quote_id") or item["quote"].get("id") for item in provider_quotes],
             "field_catalog_version": self.sandbox._catalog_version(catalog),
             "quote_expires_at": min(quote_expiries),
             "cache_hits": {"candidate_count": 0, "field_count": 0},
-            "freshness_reason": "initial_candidate_enrichment",
+            "freshness_reason": "initial_candidate_enrichment", "evidence_plan_catalog_version": evidence_plan["catalog_version"],
             "workspace_budget_impact": {"policy": "explicit_application_confirmation_required", "estimated_credits": sum(estimates) if len(estimates) == len(provider_quotes) else None},
             "confirmation_required": True, "created_at": now,
         }
+        operation = self._begin_metered_operation(
+            project, "MIREYE_FETCH", operation_request, confirmed=False, retry_reason=retry_reason, status="QUOTED",
+        )
+        operation.update(
+            quote=copy.deepcopy(provider_quotes), quoted_credits=plan["expected_credits"],
+            provider_request_ids=copy.deepcopy(plan["provider_quote_ids"]),
+        )
+        plan["operation_id"] = operation["operation_id"]
         project.update(status="AWAITING_ENRICHMENT_APPROVAL", requested_fields=selected_fields, spend_plan=plan)
         credits = plan["expected_credits"]
         cost = "an unknown number of" if credits is None else f"about {credits:g}"
@@ -736,17 +1097,35 @@ class DiligenceService:
         candidate = self._candidate(project, candidate_id)
         if candidate["reconciliation_status"] == "UNSUPPORTED":
             return copy.deepcopy(candidate)
-        if candidate["input_type"] == "coordinate":
-            resolved = await self.sandbox.resolve(**candidate["coordinate"])
-        else:
-            value = candidate["apn"] if candidate["input_type"] == "apn" else candidate["address"]
-            resolved = await self.sandbox.resolve(input=value, kind=candidate["input_type"])
+        request = {
+            "candidate_id": candidate_id, "input_type": candidate["input_type"],
+            "value": candidate.get("coordinate") or candidate.get("apn") or candidate.get("address"),
+        }
+        operation = self._begin_metered_operation(project, "MIREYE_RESOLVE", request, confirmed=True, retry_reason=None)
+        if operation["status"] == "SUCCEEDED":
+            candidate.update(copy.deepcopy(operation["result"]))
+            return copy.deepcopy(candidate)
+        self._save(project)
+        try:
+            if candidate["input_type"] == "coordinate":
+                resolved = await self.sandbox.resolve(**candidate["coordinate"])
+            else:
+                value = candidate["apn"] if candidate["input_type"] == "apn" else candidate["address"]
+                resolved = await self.sandbox.resolve(input=value, kind=candidate["input_type"])
+        except Exception as exc:
+            operation.update(status="FAILED", error=str(exc), completed_at=time.time())
+            self._save(project)
+            raise
         if resolved["status"] == "resolved":
             candidate.update(selected_location=resolved["candidates"][0], reconciliation_status="RESOLVED", error=None)
         elif resolved["status"] == "ambiguous":
             candidate.update(resolution_options=resolved["candidates"], reconciliation_status="AMBIGUOUS")
         else:
             candidate.update(reconciliation_status="NOT_FOUND", error="MIREYE could not resolve this candidate.")
+        operation.update(
+            status="SUCCEEDED", completed_at=time.time(),
+            result={key: copy.deepcopy(candidate.get(key)) for key in ("selected_location", "resolution_options", "reconciliation_status", "error")},
+        )
         self._save(project)
         return copy.deepcopy(candidate)
 
@@ -773,13 +1152,34 @@ class DiligenceService:
             raise ConfirmationRequired("MIREYE enrichment requires an answered cost DecisionRequest.")
         if time.time() >= float(plan["quote_expires_at"]):
             raise ConfirmationRequired("MIREYE enrichment quote has expired; prepare a new spend plan.")
+        operation = next(
+            (item for item in project.get("metered_operations", []) if item.get("operation_id") == plan.get("operation_id")),
+            None,
+        )
+        if operation is None:
+            raise DiligenceError("The metered operation record is unavailable.")
+        if operation["status"] == "SUCCEEDED":
+            return self._save(project)
+        if operation["status"] != "QUOTED":
+            raise DiligenceError("The paid operation is not eligible for execution.")
+        operation.update(status="EXECUTING", confirmed_at=time.time(), confirmation_decision_id=plan["approved_decision_id"])
+        self._save(project)
         fields, catalog = await self.sandbox.select_fields(plan["requested_fields"])
+        fetch_fields, preset = plan.get("fetch_fields") or fields, plan.get("preset")
         resolved = [item for item in project["candidates"] if item["reconciliation_status"] == "RESOLVED"]
+        known_charges: list[float] = []
+        provider_request_ids = list(operation.get("provider_request_ids") or [])
         for offset in range(0, len(resolved), BATCH_SIZE):
             batch = resolved[offset:offset + BATCH_SIZE]
             locations = [{"lat": item["selected_location"]["lat"], "lng": item["selected_location"]["lng"]} for item in batch]
             try:
-                payload = await self.sandbox.client.fetch_batch(locations=locations, fields=fields)
+                payload = await self.sandbox.client.fetch_batch(locations=locations, fields=fetch_fields, preset=preset)
+                request_id = payload.get("request_id") or payload.get("id")
+                if request_id:
+                    provider_request_ids.append(str(request_id))
+                charge = next((payload.get(key) for key in ("credits_charged", "charged_credits", "actual_credits") if isinstance(payload.get(key), (int, float))), None)
+                if isinstance(charge, (int, float)):
+                    known_charges.append(float(charge))
                 results = self._batch_results(payload)
             except Exception as exc:
                 results = [{"ok": False, "error": {"message": str(exc)}} for _ in batch]
@@ -808,12 +1208,20 @@ class DiligenceService:
                     self._finalize_candidate(project, candidate, snapshot)
                 except (SandboxError, SceneValidationError, KeyError, TypeError, ValueError) as exc:
                     candidate.update(reconciliation_status="ENRICHMENT_FAILED", error=str(exc), evaluation=None)
+        failures = [item["candidate_id"] for item in resolved if item.get("reconciliation_status") == "ENRICHMENT_FAILED"]
+        operation.update(
+            status="PARTIAL" if failures else "SUCCEEDED", completed_at=time.time(),
+            charged_credits=sum(known_charges) if known_charges else "UNKNOWN",
+            provider_request_ids=list(dict.fromkeys(provider_request_ids)),
+            result={"snapshot_ids": [item.get("snapshot_id") for item in resolved if item.get("snapshot_id")], "failed_candidate_ids": failures},
+        )
         plan["status"] = "COMPLETED"
         plan["completed_at"] = time.time()
         project["ranking"] = self._rank(project["candidates"])
         project["decision"] = self._decision(project["request"], project["ranking"])
         if not project.get("active_decision"):
             project["status"] = "EVALUATED" if project["decision"]["status"] == "DECISION_READY" else project["decision"]["status"]
+        self._update_project_intelligence(project)
         return self._save(project)
 
     def rank_candidates(self, project_id: str) -> dict:
@@ -822,11 +1230,13 @@ class DiligenceService:
             project["ranking"] = []
             project["decision"] = self._decision(project["request"], [])
             project["status"] = "NEEDS_USER_DECISION" if project.get("active_decision") else "NO_DECISION_YET"
+            self._update_project_intelligence(project)
             self._save(project)
             return {"project_id": project_id, "ranking": [], "decision": project["decision"], "ranking_version": "deterministic_outcome_order_v2"}
         project["ranking"] = self._rank(project["candidates"])
         project["decision"] = self._decision(project["request"], project["ranking"])
         project["status"] = "EVALUATED" if project["decision"]["status"] == "DECISION_READY" else project["decision"]["status"]
+        self._update_project_intelligence(project)
         self._save(project)
         return {"project_id": project_id, "ranking": project["ranking"], "decision": project["decision"], "ranking_version": "deterministic_outcome_order_v2"}
 
@@ -850,6 +1260,7 @@ class DiligenceService:
         project["decision"] = self._decision(project["request"], project["ranking"])
         if not self._queue_address_confirmation(project):
             project["status"] = "EVALUATED" if project["decision"]["status"] == "DECISION_READY" else project["decision"]["status"]
+        self._update_project_intelligence(project)
         return self._save(project)
 
     def _queue_address_confirmation(self, project: dict) -> dict | None:
@@ -891,6 +1302,9 @@ class DiligenceService:
         candidate = self._candidate(project, candidate_id)
         if candidate.get("reconciliation_status") != "ENRICHED" or not candidate.get("snapshot_id"):
             raise DiligenceError("Candidate must be enriched and any address mismatch confirmed before opening the sandbox.")
+        project["active_candidate_id"] = candidate_id
+        self._update_project_intelligence(project)
+        self._save(project)
         world = self.worlds.latest_for_site_snapshot(candidate["snapshot_id"]) if self.worlds else None
         world_id = world.get("world_snapshot_id") if world else None
         query = f"?world={world_id}" if world_id else ""
@@ -904,15 +1318,36 @@ class DiligenceService:
         if not candidate.get("snapshot_id"):
             raise DiligenceError("Candidate must be enriched before building its world.")
         existing = self.worlds.latest_for_site_snapshot(candidate["snapshot_id"])
-        layers = requested_layers or ["terrain", "roads"]
+        layers = requested_layers or ["terrain", "roads", "buildings", "water", "land_cover", "transmission"]
         world = await self.worlds.create(site_snapshot_id=candidate["snapshot_id"], requested_layers=layers)
-        return {"candidate_id": candidate_id, "world_snapshot_id": world["world_snapshot_id"], "reused": existing is not None and existing["world_snapshot_id"] == world["world_snapshot_id"]}
+        changes = []
+        if existing and existing["world_snapshot_id"] != world["world_snapshot_id"]:
+            snapshot = self.sandbox.get_snapshot(candidate["snapshot_id"])
+            changes = changes_from_world_refresh(
+                project_id=project_id, site_id=candidate["site_id"], site_snapshot=snapshot,
+                before_world=existing, after_world=world, intelligence=project.get("project_intelligence"),
+            )
+            self.store.save_project_changes(changes)
+            project["recent_changes"] = copy.deepcopy(changes[-10:])
+        candidate.setdefault("summary", {})["sandbox_url"] = f"/sandbox/{candidate['snapshot_id']}?world={world['world_snapshot_id']}"
+        self._save(project)
+        return {
+            "candidate_id": candidate_id, "world_snapshot_id": world["world_snapshot_id"],
+            "reused": existing is not None and existing["world_snapshot_id"] == world["world_snapshot_id"],
+            "changes": changes,
+        }
 
     def set_watch(self, project_id: str, *, enabled: bool) -> dict:
         project = self.get(project_id)
-        project["watch"]["enabled"] = bool(enabled)
+        watch = project.setdefault("watch", {})
+        watch.setdefault("watch_id", f"watch_{uuid.uuid4().hex}")
+        watch.update(
+            project_id=project_id, source="MIREYE", cadence_policy="MANUAL", enabled=bool(enabled),
+            fields=copy.deepcopy(project.get("requested_fields", [])), layers=watch.get("layers", []),
+            cost_policy={"metered_refresh": "EXPLICIT_CONFIRMATION_REQUIRED"},
+        )
         self._save(project)
-        return project["watch"]
+        return copy.deepcopy(watch)
 
     def check_now(self, project_id: str) -> dict:
         project = self.get(project_id)
@@ -921,30 +1356,164 @@ class DiligenceService:
             if candidate.get("snapshot_id"):
                 freshness = self.sandbox.freshness_status(candidate["snapshot_id"], fields=project["requested_fields"])
                 states.append({"candidate_id": candidate["candidate_id"], "snapshot_id": candidate["snapshot_id"], "status": freshness["status"], "refresh_fields": freshness["refresh_fields"]})
-        project["watch"].update(last_checked_at=time.time(), candidate_states=states)
+        watch = project.setdefault("watch", {})
+        watch.update(
+            project_id=project_id, source="MIREYE", fields=copy.deepcopy(project.get("requested_fields", [])),
+            cadence_policy="MANUAL", last_checked_at=time.time(), candidate_states=states,
+            last_known_state={item["candidate_id"]: {"snapshot_id": item["snapshot_id"], "status": item["status"]} for item in states},
+        )
         self._save(project)
-        return copy.deepcopy(project["watch"])
+        return copy.deepcopy(watch)
+
+    @traced_async("workflow.check_now")
+    async def check_now_workflow(
+        self, project_id: str, *, candidate_id: str | None = None,
+        spend_plan_id: str | None = None, confirmed: bool = False,
+    ) -> dict:
+        """Inspect first; quote only stale evidence; execute only an explicitly confirmed plan."""
+        if spend_plan_id:
+            if not candidate_id:
+                raise DiligenceError("candidate_id is required to confirm a check-now refresh.")
+            if not confirmed:
+                raise ConfirmationRequired("MIREYE refresh requires explicit application confirmation.")
+            result = await self.confirm_candidate_refresh(project_id, candidate_id, spend_plan_id, confirmed=True)
+            return {
+                "status": "CHECK_COMPLETE", "watch": result["project"]["watch"],
+                "refresh": result["refresh"], "impact_summary": result["impact_summary"],
+            }
+        watch = self.check_now(project_id)
+        stale = [item for item in watch["candidate_states"] if item["status"] != "CURRENT" and (candidate_id is None or item["candidate_id"] == candidate_id)]
+        if not stale:
+            return {"status": "CURRENT", "watch": watch, "refresh_plans": [], "changes": self.changes(project_id, limit=10)}
+        plans = []
+        for item in stale:
+            plan = await self.quote_candidate_refresh(project_id, item["candidate_id"])
+            if plan.get("status") != "NO_REFRESH_REQUIRED":
+                plans.append({"candidate_id": item["candidate_id"], **plan})
+        return {
+            "status": "AWAITING_CONFIRMATION" if plans else "CURRENT", "watch": watch,
+            "refresh_plans": plans, "confirmation_required": bool(plans),
+        }
 
     async def quote_candidate_refresh(self, project_id: str, candidate_id: str) -> dict:
         project = self.get(project_id)
         candidate = self._candidate(project, candidate_id)
         if not candidate.get("snapshot_id"):
             raise DiligenceError("Candidate has no SiteSnapshot to refresh.")
-        return await self.sandbox.quote_refresh(candidate["snapshot_id"], fields=project["requested_fields"])
+        profile = (project.get("evidence_plan") or {}).get("profile")
+        return await self.sandbox.quote_refresh(
+            candidate["snapshot_id"],
+            project_profile=profile,
+            fields=None if profile else project["requested_fields"],
+        )
 
     async def confirm_candidate_refresh(self, project_id: str, candidate_id: str, spend_plan_id: str, *, confirmed: bool) -> dict:
         project = self.get(project_id)
         candidate = self._candidate(project, candidate_id)
+        previous_snapshot = self.sandbox.get_snapshot(candidate.get("snapshot_id", ""))
+        if previous_snapshot is None:
+            raise DiligenceError("Candidate has no SiteSnapshot to refresh.")
+        previous_intelligence = copy.deepcopy(project.get("project_intelligence"))
+        previous_world = self.worlds.latest_for_site_snapshot(previous_snapshot["snapshot_id"]) if self.worlds else None
         result = await self.sandbox.confirm_and_refresh(spend_plan_id, confirmed_by_application=confirmed)
         snapshot = result["snapshot"]
+        current_world = None
+        if previous_world and self.worlds and hasattr(self.worlds, "create"):
+            road_source = next((item.get("source") for item in previous_world.get("layers", []) if item.get("layer") == "roads"), {}) or {}
+            try:
+                current_world = await self.worlds.create(
+                    site_snapshot_id=snapshot["snapshot_id"],
+                    buffer_m=previous_world.get("query_aoi", {}).get("buffer_m", 1000),
+                    requested_layers=[item["layer"] for item in previous_world.get("layers", [])],
+                    options={"overture_release": road_source["release"]} if road_source.get("release") else {},
+                )
+            except WorldError:
+                current_world = None
         scene = scene_state_from_snapshot(snapshot)
         constraints = project["request"]["constraints"] or [{"constraint_id": "footprint_inside_parcel"}]
         candidate.update(snapshot_id=snapshot["snapshot_id"], site_id=snapshot.get("site_id"), evaluation=evaluate_site(snapshot, scene, constraints))
+        candidate.setdefault("summary", {})["sandbox_url"] = (
+            f"/sandbox/{snapshot['snapshot_id']}?world={current_world['world_snapshot_id']}" if current_world
+            else f"/sandbox/{snapshot['snapshot_id']}"
+        )
         project["ranking"] = self._rank(project["candidates"])
         project["decision"] = self._decision(project["request"], project["ranking"])
         project["status"] = "EVALUATED" if project["decision"]["status"] == "DECISION_READY" else project["decision"]["status"]
+        self._update_project_intelligence(project, changed_evidence_ids=result["snapshot_diff"].get("changed_evidence_ids", []))
+        current_intelligence = project.get("project_intelligence")
+        self._propagate_action_lifecycle(project, previous_intelligence, current_intelligence, previous_snapshot["snapshot_id"], snapshot["snapshot_id"])
+        current_world = current_world or (self.worlds.latest_for_site_snapshot(snapshot["snapshot_id"]) if self.worlds else None)
+        changes = changes_from_refresh(
+            project_id=project_id, site_id=snapshot["site_id"], before_snapshot=previous_snapshot,
+            after_snapshot=snapshot, snapshot_diff=result["snapshot_diff"],
+            before_intelligence=previous_intelligence, after_intelligence=current_intelligence,
+            evaluation_runs=result.get("evaluation_runs", []), world_before=previous_world, world_after=current_world,
+            scenario_dependencies={
+                evidence_id: self.store.affected_scenario_constraints(snapshot["site_id"], [evidence_id])
+                for evidence_id in result["snapshot_diff"].get("changed_evidence_ids", [])
+            },
+        )
+        self.store.save_project_changes(changes)
+        project["recent_changes"] = copy.deepcopy(changes[-10:])
+        project.setdefault("watch", {}).update(
+            last_checked_at=time.time(),
+            last_known_state={candidate_id: {"snapshot_id": snapshot["snapshot_id"], "status": "CURRENT"}},
+            candidate_states=[{"candidate_id": candidate_id, "snapshot_id": snapshot["snapshot_id"], "status": "CURRENT", "refresh_fields": []}],
+        )
         self._save(project)
-        return {"project": project, "refresh": result}
+        return {"project": project, "refresh": result, "changes": changes, "impact_summary": self._change_summary(changes)}
+
+    def changes(
+        self, project_id: str, *, site_id: str | None = None, significance: str | None = None,
+        source: str | None = None, change_type: str | None = None, requirement_id: str | None = None,
+        since: float | None = None, limit: int = 100,
+    ) -> dict:
+        self.get(project_id)
+        items = self.store.list_project_changes(
+            project_id, site_id=site_id, significance=significance, source=source,
+            change_type=change_type, since=since,
+        )
+        if requirement_id:
+            items = [item for item in items if requirement_id in item.get("affected_requirements", [])]
+        items = items[:max(1, min(int(limit), 500))]
+        return {"project_id": project_id, **self._change_summary(items), "items": items}
+
+    @staticmethod
+    def _change_summary(changes: list[dict]) -> dict:
+        material = [item for item in changes if item.get("significance") in {"MEDIUM", "HIGH", "CRITICAL"}]
+        return {
+            "change_count": len(changes), "material_change_count": len(material),
+            "highest_significance": next((level for level in ("CRITICAL", "HIGH", "MEDIUM", "LOW", "INFO") if any(item.get("significance") == level for item in changes)), None),
+            "affected_scenarios": sorted({item["scenario_id"] for change in changes for item in change.get("affected_scenarios", [])}),
+            "affected_requirements": sorted({item for change in changes for item in change.get("affected_requirements", [])}),
+        }
+
+    @staticmethod
+    def _propagate_action_lifecycle(project: dict, before: dict | None, after: dict | None, snapshot_before: str, snapshot_after: str) -> None:
+        old_actions = {item["action_id"]: item for item in (before or {}).get("recommended_actions", [])}
+        new_actions = {item["action_id"]: item for item in (after or {}).get("recommended_actions", [])}
+        coverage = {item["requirement_id"]: item for item in (after or {}).get("evidence_coverage", [])}
+        transitions = project.setdefault("action_transitions", [])
+        for action in new_actions.values():
+            action["lifecycle_status"] = "CURRENT"
+        for action_id, old in old_actions.items():
+            current = new_actions.get(action_id)
+            if current and old.get("required_evidence") == current.get("required_evidence"):
+                continue
+            if current:
+                state = "STALE"
+            else:
+                state = "COMPLETED" if coverage.get(old.get("requirement_id"), {}).get("decision_provable") else "SUPERSEDED"
+            transition = {
+                "action_id": action_id, "from": old.get("lifecycle_status", "CURRENT"), "to": state,
+                "snapshot_before": snapshot_before, "snapshot_after": snapshot_after,
+            }
+            if transition not in transitions:
+                transitions.append(transition)
+        if after:
+            after["state_hash"] = hashlib.sha256(_canonical({
+                key: value for key, value in after.items() if key not in {"state_hash", "last_evaluated_at"}
+            }).encode("utf-8")).hexdigest()
 
     def get_evidence(self, project_id: str, candidate_id: str, evidence_ids: list[str] | None = None) -> dict:
         project = self.get(project_id)
@@ -1096,12 +1665,14 @@ class DiligenceService:
         request["requirement_status"] = "REVIEW_REQUIRED" if request["requirement_gaps"] else "READY"
         request["constraint_revision"] = int(request.get("constraint_revision", 0)) + 1
         project["decision"] = self._decision(request, project.get("ranking", []))
+        self._update_project_intelligence(project)
 
     def _finalize_candidate(self, project: dict, candidate: dict, snapshot: dict) -> None:
         scene = scene_state_from_snapshot(snapshot)
         constraints = project["request"]["constraints"] or [{"constraint_id": "footprint_inside_parcel"}]
         evidence = snapshot.get("evidence", {})
-        value = lambda field: (evidence.get(field) or {}).get("value")
+        def value(field: str) -> Any:
+            return (evidence.get(field) or {}).get("value")
         world = self.worlds.latest_for_site_snapshot(snapshot["snapshot_id"]) if self.worlds else None
         world_query = f"?world={world['world_snapshot_id']}" if world else ""
         candidate.update(
@@ -1131,7 +1702,8 @@ class DiligenceService:
         if all(item["outcome_counts"]["PASS"] == item["outcome_counts"]["FAIL"] == 0 for item in enriched):
             return {"status": "NO_DECISION_YET", "reason": "All evaluated candidate constraints remain unresolved."}
         top = enriched[0]
-        score = lambda item: (item["outcome_counts"]["FAIL"], item["outcome_counts"]["UNRESOLVED"], -item["outcome_counts"]["PASS"])
+        def score(item: dict) -> tuple[int, int, int]:
+            return (item["outcome_counts"]["FAIL"], item["outcome_counts"]["UNRESOLVED"], -item["outcome_counts"]["PASS"])
         if top["overall_status"] != "PASS":
             return {"status": "NO_DECISION_YET", "reason": "The leading candidate still has failed or unresolved constraints."}
         if len(enriched) > 1 and score(top) == score(enriched[1]):
@@ -1188,6 +1760,48 @@ class DiligenceService:
         raise DiligenceError("Candidate was not found in this project.")
 
     @staticmethod
+    def _site_candidate(project: dict, site_id: str) -> dict:
+        candidate = next((item for item in project.get("candidates", []) if item.get("site_id") == site_id and item.get("snapshot_id")), None)
+        if candidate is None:
+            raise DiligenceError("The requested site is not an enriched candidate in this project.")
+        return candidate
+
+    def _rfi_context(self, project: dict, action: dict) -> dict:
+        candidate = next((item for item in project.get("candidates", []) if item.get("site_id") == action.get("site_id")), None)
+        snapshot = self.store.get_site_snapshot(candidate["snapshot_id"]) if candidate and candidate.get("snapshot_id") else None
+        identity = (snapshot or {}).get("parcel_identity", {})
+        power = project.get("power_readiness_by_site", {}).get(action.get("site_id"))
+        entitlement = project.get("entitlement_by_site", {}).get(action.get("site_id"))
+        return {
+            "project_requirements": copy.deepcopy(project.get("request", {}).get("power_requirements", {})),
+            "site": {
+                "site_id": action.get("site_id"), "parcel_id": identity.get("parcel_id"),
+                "address": identity.get("parcel_address"), "selected_point": copy.deepcopy(identity.get("selected_point")),
+            },
+            "known_evidence": copy.deepcopy((power or entitlement or {}).get("items", [])),
+            "required_evidence": copy.deepcopy(action.get("required_evidence", [])),
+            "recipient_category": action.get("recipient_category"),
+            "timeline": "UNKNOWN", "human_approval_required": True,
+        }
+
+    def _build_site_readiness(self, project: dict, candidate: dict) -> tuple[dict, dict]:
+        snapshot = self.store.get_site_snapshot(candidate["snapshot_id"])
+        if snapshot is None:
+            raise DiligenceError("The candidate SiteSnapshot is unavailable.")
+        scoped_project = copy.deepcopy(project)
+        scoped_project["active_candidate_id"] = candidate["candidate_id"]
+        intelligence = build_project_intelligence(
+            scoped_project, self.store.get_site_snapshot, CONSTRAINT_CAPABILITIES, CONSTRAINT_FIELDS,
+            dependency_lookup=self.store.affected_scenario_constraints,
+        )
+        external = project.get("external_evidence_by_site", {}).get(candidate["site_id"], {})
+        power = build_power_readiness(project, candidate, snapshot, intelligence, external)
+        entitlement = build_entitlement_state(project, candidate, snapshot, intelligence, external)
+        project.setdefault("power_readiness_by_site", {})[candidate["site_id"]] = power
+        project.setdefault("entitlement_by_site", {})[candidate["site_id"]] = entitlement
+        return power, entitlement
+
+    @staticmethod
     def _candidate_resolution_view(candidates: list[dict]) -> dict:
         status_map = {
             "RESOLVED": ("EXACT_MATCH", None), "ENRICHED": ("EXACT_MATCH", None),
@@ -1222,6 +1836,27 @@ class DiligenceService:
             "items": items, "exact_count": exact_count, "attention_count": len(items) - exact_count,
             "has_attention": exact_count != len(items),
         }
+
+    def _update_project_intelligence(self, project: dict, *, changed_evidence_ids: list[str] | None = None) -> None:
+        intelligence = build_project_intelligence(
+            project, self.store.get_site_snapshot, CONSTRAINT_CAPABILITIES, CONSTRAINT_FIELDS,
+            dependency_lookup=self.store.affected_scenario_constraints,
+            changed_evidence_ids=changed_evidence_ids,
+        )
+        active = intelligence.get("active_site")
+        if active and active.get("site_id") and active.get("site_snapshot_id"):
+            candidate = self._site_candidate(project, active["site_id"])
+            snapshot = self.store.get_site_snapshot(active["site_snapshot_id"])
+            if snapshot:
+                external = project.get("external_evidence_by_site", {}).get(active["site_id"], {})
+                power = build_power_readiness(project, candidate, snapshot, intelligence, external)
+                entitlement = build_entitlement_state(project, candidate, snapshot, intelligence, external)
+                project.setdefault("power_readiness_by_site", {})[active["site_id"]] = power
+                project.setdefault("entitlement_by_site", {})[active["site_id"]] = entitlement
+                intelligence["power_readiness"] = copy.deepcopy(power)
+                intelligence["entitlement"] = copy.deepcopy(entitlement)
+                intelligence["state_hash"] = hashlib.sha256(_canonical({key: value for key, value in intelligence.items() if key not in {"state_hash", "last_evaluated_at"}}).encode("utf-8")).hexdigest()
+        project["project_intelligence"] = intelligence
 
     def _save(self, project: dict) -> dict:
         project["updated_at"] = time.time()

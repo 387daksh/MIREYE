@@ -1,0 +1,1 @@
+"""Temporary-resource integration tests."""

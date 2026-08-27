@@ -1,0 +1,123 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.15"
+          enable-cache: true
+      - run: uv sync --frozen --extra world --group dev --group test
+      - name: Formatting
+        run: uv run ruff format --check app/infrastructure app/domain app/application app/adapters app/ai tests/unit migrations scripts/export_openapi.py
+      - name: Ruff
+        run: |
+          uv run ruff check --select E9,F63,F7,F82 app tests scripts
+          uv run ruff check app/infrastructure app/domain app/application app/adapters app/ai tests/unit migrations scripts/export_openapi.py
+      - name: Typed foundation
+        run: uv run mypy --follow-imports=silent app/infrastructure app/domain app/application app/ai
+      - name: Focused regressions
+        run: |
+          uv run pytest -q tests/unit tests/test_world.py tests/test_phase11.py tests/test_phase12.py tests/test_phase13.py
+          uv run pytest -q tests/test_diligence.py -k phase10
+      - name: Frontend syntax
+        run: |
+          node --check app/static/app.js
+          node --check app/static/sandbox.js
+      - name: OpenAPI export
+        run: uv run python scripts/export_openapi.py build/openapi.json
+      - name: Generated frontend API contract
+        run: |
+          npm --prefix frontend ci
+          npm --prefix frontend run generate:api
+          git diff --exit-code -- frontend/src/lib/api.generated.ts
+          npm --prefix frontend run typecheck
+          npm --prefix frontend run build
+      - name: Dependency audit
+        run: uv run pip-audit
+
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          tags: mireye:ci
+      - uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: false
+          tags: mireye-frontend:ci
+      - name: Compose configuration
+        run: docker compose config
+
+  integration:
+    needs: [quality, docker]
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.8.15"
+          enable-cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install test tools
+        run: |
+          uv sync --frozen --extra world --group test
+          npm --prefix frontend ci
+          uv run playwright install --with-deps chromium
+      - name: Start runtime stack and wait for readiness
+        run: docker compose up -d --build --wait
+      - name: Verify service contracts
+        run: |
+          docker compose exec -T api alembic current
+          docker compose exec -T postgres psql -U mireye -d mireye -c "SELECT postgis_version(); SELECT extversion FROM pg_extension WHERE extname='vector';"
+          docker compose exec -T redis redis-cli ping
+          curl --fail --silent http://localhost:8222/healthz
+          docker compose exec -T temporal temporal operator cluster health --address temporal:7233
+          curl --fail --silent http://localhost:9000/minio/health/ready
+          curl --fail --silent http://localhost:8000/health/ready
+          curl --fail --silent http://localhost:3000/
+      - name: Real-service integration tests
+        env:
+          MIREYE_RUNTIME_INTEGRATION: "1"
+          DATABASE_URL: postgresql+psycopg://mireye:mireye@localhost:5432/mireye
+          REDIS_URL: redis://localhost:6379/0
+          NATS_URL: nats://localhost:4222
+          TEMPORAL_TARGET: localhost:7233
+          S3_ENDPOINT_URL: http://localhost:9000
+          S3_BUCKET: mireye-world
+          S3_ACCESS_KEY_ID: minioadmin
+          S3_SECRET_ACCESS_KEY: minioadmin
+        run: uv run pytest -q tests/integration/test_container_services.py
+      - name: Restart recovery contract
+        run: |
+          docker compose restart worker event-consumer api
+          docker compose up -d --wait
+          curl --fail --silent http://localhost:8000/health/ready
+      - name: Frontend unit and Playwright journey
+        env:
+          MIREYE_RUNTIME_INTEGRATION: "1"
+        run: |
+          npm --prefix frontend test
+          uv run pytest -q tests/browser/test_orchestration_e2e.py
+      - name: Runtime diagnostics
+        if: failure()
+        run: docker compose ps && docker compose logs --no-color --tail=200
+      - name: Stop runtime stack
+        if: always()
+        run: docker compose down -v --remove-orphans

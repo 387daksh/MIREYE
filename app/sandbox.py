@@ -13,6 +13,7 @@ import httpx
 from shapely.geometry import Point, mapping, shape
 
 from app.mireye_client import MireyeClient
+from app.infrastructure.observability import traced_async
 from app.workspace.store import WorkspaceStore
 
 
@@ -55,19 +56,83 @@ SITE_SNAPSHOT_FIELDS = (
 
 DATA_CENTER_SITING_PRESET = "data_center_siting"
 MIREYE_EXPLICIT_FIELD_LIMIT = 50
-DATA_CENTER_CONTEXT_FIELDS = (
-    "parcel_id", "parcel_apn", "parcel_address", "parcel_owner", "parcel_zoning",
-    "parcel_area_m2", "parcel_boundary_geojson", "parcel_data_source",
-    "parcel_match_type", "parcel_match_distance_m", "parcel_match_radius_m",
-    "elevation", "aspect_degrees", "aspect_cardinal", "soil_drainage_class",
-    "bedrock_depth_cm", "lcms_class", "land_use_class", "tree_canopy_pct",
-    "wetland_acres_on_parcel", "wetland_fraction_of_parcel",
-    "nearest_major_road_distance_m", "nearest_major_road_name",
-    "nearest_major_road_class", "roads_within_500m_count",
-    "primary_building_overture_class", "primary_building_height_m",
-    "primary_building_num_floors", "primary_building_footprint_sqm",
-    "political_region", "political_county", "political_locality", "tract_geoid",
-)
+PROJECT_EVIDENCE_FIELDS = {
+    "identity": (
+        "parcel_id", "parcel_apn", "parcel_address", "parcel_owner", "parcel_zoning",
+        "parcel_area_m2", "parcel_boundary_geojson", "parcel_data_source",
+        "parcel_match_type", "parcel_match_distance_m", "parcel_match_radius_m",
+    ),
+    "grid": (
+        "nearest_osm_transmission_line_distance_m", "nearest_osm_transmission_line_voltage_kv",
+        "nearest_osm_transmission_line_circuits", "nearest_osm_transmission_line_operator",
+        "nearest_osm_transmission_line_lifecycle", "nearest_osm_substation_distance_m",
+        "nearest_osm_substation_name", "nearest_osm_substation_max_voltage_kv",
+        "nearest_osm_substation_operator", "nearest_osm_substation_type",
+        "nearest_osm_transmission_transformer_distance_m", "nearest_osm_transmission_transformer_rating_mva",
+        "nearest_substation_distance_m", "nearest_substation_max_voltage_kv", "nearest_substation_status",
+        "nearest_transmission_line_distance_m", "nearest_transmission_line_voltage_kv",
+        "nearest_transmission_line_voltage_class", "nearest_transmission_line_voltage_basis",
+        "nearest_transmission_line_status", "nearest_transmission_line_owner",
+        "max_transmission_line_voltage_kv_within_radius", "max_transmission_line_voltage_class_within_radius",
+        "transmission_lines_within_radius_count", "substations_within_radius_count", "substations_radius_m",
+        "electric_utility_service_territory", "iso_rto", "interconnection_queue_active_capacity_county_mw",
+        "interconnection_queue_active_capacity_ercot_mw",
+        "nearest_power_plant_name", "nearest_power_plant_distance_m", "nearest_power_plant_primary_fuel",
+        "nearest_power_plant_capacity_mw", "nearest_power_plant_operator",
+        "nearest_power_plant_technology", "nearest_power_plant_sector", "nearest_gas_pipeline_distance_m",
+        "nearest_gas_pipeline_operator", "nearest_gas_pipeline_type", "nearest_interstate_gas_pipeline_distance_m",
+        "transmission_redundancy_flag",
+    ),
+    "terrain": (
+        "elevation", "slope_degrees", "aspect_degrees", "aspect_cardinal", "soil_drainage_class",
+        "soil_hydrologic_group", "soil_shrink_swell_class", "soil_restrictive_layer_depth_cm",
+        "bedrock_depth_cm", "grading_difficulty_class", "lcms_class", "land_use_class", "tree_canopy_pct",
+    ),
+    "environment": (
+        "within_floodplain_polygon", "fema_flood_zone", "intersects_wetland",
+        "wetland_acres_on_parcel", "wetland_fraction_of_parcel", "nearest_wetland_distance_m",
+        "surface_water_permanence_pct", "nearest_waterbody_name", "seismic_design_category",
+        "design_wind_speed_mph", "wildfire_annual_frequency", "drought_category",
+        "nearest_dam_distance_m", "nearest_dam_hazard_potential", "in_air_quality_nonattainment",
+        "nearest_superfund_distance_m", "nearest_brownfield_distance_m",
+    ),
+    "access_utilities": (
+        "nearest_major_road_distance_m", "nearest_major_road_name", "nearest_major_road_class",
+        "roads_within_500m_count", "nearest_rail_line_distance_m", "nearest_long_haul_rail_corridor_distance_m",
+        "fiber_provider_count", "fiber_broadband_available", "within_water_service_area", "water_system_name",
+        "water_service_area_provenance", "within_sewer_service_area", "sewer_service_area_provider",
+        "sewer_service_area_provenance", "nearest_wastewater_plant_distance_m",
+        "public_water_system_population_served",
+    ),
+    "site_context": (
+        "primary_building_overture_class", "primary_building_height_m", "primary_building_num_floors",
+        "primary_building_footprint_sqm", "surface_management_agency", "in_opportunity_zone",
+        "political_region", "political_county", "political_locality", "tract_geoid",
+    ),
+}
+DATA_CENTER_CONTEXT_FIELDS = tuple(dict.fromkeys(
+    field for fields in PROJECT_EVIDENCE_FIELDS.values() for field in fields
+))
+DATA_CENTER_EVIDENCE_DOMAINS = tuple(PROJECT_EVIDENCE_FIELDS)
+REQUIREMENT_EVIDENCE_DOMAINS = {
+    "parcel_acreage_range": ("identity",), "land_size_context": ("identity",),
+    "resolution_point_outside_fema_sfha": ("environment",), "parcel_outside_fema_sfha": ("environment",),
+    "footprint_outside_fema_sfha": ("environment",), "wetland_context": ("environment",),
+    "max_nwi_wetland_fraction_of_parcel": ("environment",), "max_nwi_wetland_acres_on_parcel": ("environment",),
+    "max_resolution_point_slope_degrees": ("terrain",), "max_slope_degrees": ("terrain",),
+    "terrain_context": ("terrain",), "max_resolution_point_substation_distance_m": ("grid",),
+    "max_resolution_point_transmission_distance_m": ("grid",), "transmission_proximity": ("grid",),
+    "sufficient_grid_capacity": ("grid",), "max_resolution_point_major_road_distance_m": ("access_utilities",),
+    "road_proximity": ("access_utilities",), "legal_access": ("access_utilities",),
+    "parcel_zoning_code_in": ("identity",), "industrial_zoning": ("identity",), "zoning_context": ("identity",),
+    "data_center_entitlement": ("identity", "site_context"),
+    "water_capacity": ("access_utilities",), "fiber_diversity": ("access_utilities",),
+}
+DOMAIN_IMPACT = {
+    "identity": "CRITICAL", "grid": "CRITICAL", "terrain": "MEDIUM",
+    "environment": "HIGH", "access_utilities": "HIGH", "site_context": "MEDIUM",
+}
+EVIDENCE_SEMANTIC_VERSION = "mireye_evidence_semantics_v1"
 
 SITE_SNAPSHOT_FIELD_SCOPES = {
     "parcel_area_m2": "PARCEL",
@@ -372,6 +437,69 @@ def _coerce_location(value: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def _catalog_scope(name: str, metadata: dict) -> str | None:
+    declared = metadata.get("scope") or metadata.get("spatial_scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(name)
+    if declared:
+        return str(declared).upper().replace("-", "_")
+    if name.startswith("parcel_") or name.endswith("_on_parcel") or "fraction_of_parcel" in name:
+        return "PARCEL"
+    if name.startswith("nearest_") or name.endswith("_distance_m") or "within_radius" in name:
+        return "NEAREST_FEATURE"
+    return "POINT"
+
+
+def _field_semantics(name: str, record: dict, metadata: dict) -> dict:
+    status, value = record.get("status"), record.get("value")
+    scope = _catalog_scope(name, metadata)
+    if status not in {None, "ok"} or value is None:
+        return {
+            "semantic_strength": "INSUFFICIENT_EVIDENCE", "semantic_class": "UNAVAILABLE_VALUE",
+            "is_direct": False, "claim_limits": ["No usable value was returned for this field."],
+        }
+    source = str(record.get("source") or metadata.get("source") or "").upper()
+    derivation = metadata.get("derivation")
+    derived = bool(derivation) or source.startswith("MIREYE_DERIVED") or name.startswith(("estimated_", "modeled_")) or name in {
+        "transmission_redundancy_flag", "grading_difficulty_class", "developable_acres_proxy",
+    }
+    if derived:
+        strength, semantic_class = "DERIVED", "SOURCE_DERIVED_SIGNAL"
+    elif name in {
+        "parcel_id", "parcel_apn", "parcel_address", "parcel_owner", "parcel_area_m2",
+        "parcel_boundary_geojson", "parcel_data_source", "parcel_match_type", "parcel_match_distance_m",
+    }:
+        strength, semantic_class = "DIRECTLY_VERIFIED", "PARCEL_IDENTITY_FACT"
+    elif name == "parcel_zoning":
+        strength, semantic_class = "DIRECTLY_VERIFIED", "RAW_ZONING_FACT"
+    elif scope == "PARCEL":
+        strength, semantic_class = "DIRECTLY_VERIFIED", "PARCEL_SCOPED_FACT"
+    elif scope == "POINT":
+        strength, semantic_class = "SOURCE_BACKED_SIGNAL", "POINT_SCOPED_SIGNAL"
+    else:
+        strength, semantic_class = "SOURCE_BACKED_SIGNAL", "PROXIMITY_OR_CONTEXT_SIGNAL"
+    limits = []
+    if name.startswith("nearest_") or "within_radius" in name or name in {"transmission_redundancy_flag", "interconnection_queue_active_capacity_county_mw"}:
+        limits.append("Infrastructure proximity, voltage, counts, queue totals, and redundancy signals do not prove available or deliverable capacity.")
+    if name == "parcel_zoning":
+        limits.append("A raw zoning value does not establish permitted data-center use or entitlement.")
+    if name in {"within_floodplain_polygon", "fema_flood_zone"}:
+        limits.append("This point-scoped FEMA evidence does not prove whole-parcel or footprint flood exclusion.")
+    if name == "slope_degrees":
+        limits.append("Point slope does not prove parcel-wide or footprint-wide slope.")
+    if name.startswith("nearest_major_road") or name == "roads_within_500m_count":
+        limits.append("Mapped-road proximity does not prove legal access, frontage, easements, or heavy-haul suitability.")
+    if name in {"within_water_service_area", "water_system_name", "public_water_system_population_served"}:
+        limits.append("Service-area context does not prove project water capacity or a service commitment.")
+    if name in {"fiber_provider_count", "fiber_broadband_available"}:
+        limits.append("Provider availability does not prove physically diverse routes or contracted capacity.")
+    hint = metadata.get("interpretation_hints")
+    if hint:
+        limits.append(str(hint))
+    return {
+        "semantic_strength": strength, "semantic_class": semantic_class,
+        "is_direct": strength == "DIRECTLY_VERIFIED", "claim_limits": list(dict.fromkeys(limits)),
+    }
+
+
 class SiteSnapshotService:
     """Coordinates explicit resolution, quote, fetch, validation, and persistence."""
 
@@ -660,6 +788,7 @@ class SiteSnapshotService:
         self.store.create_mireye_spend_plan(spend_plan)
         return spend_plan
 
+    @traced_async("workflow.evidence_refresh")
     async def confirm_and_refresh(self, spend_plan_id: str, *, confirmed_by_application: bool) -> dict:
         plan = self.store.get_mireye_spend_plan(spend_plan_id)
         if plan is None:
@@ -739,48 +868,99 @@ class SiteSnapshotService:
     async def _field_selection(self) -> tuple[list[str], dict]:
         return await self._catalog_selection(list(SITE_SNAPSHOT_FIELDS))
 
-    async def project_intelligence_plan(
-        self, snapshot_id: str, *, profile: str = DATA_CENTER_SITING_PRESET, now: float | None = None,
+    async def catalog_evidence_plan(
+        self,
+        *,
+        project_type: str,
+        requirements: list[dict] | None = None,
+        unresolved_gaps: list[dict] | None = None,
+        requested_decision: str = "site_diligence",
+        snapshot_id: str | None = None,
+        profile: str | None = None,
+        now: float | None = None,
+        require_profile: bool = False,
     ) -> dict:
-        """Plan one project-specific evidence pass from the live catalog without fetching."""
-        if self.store.get_site_snapshot(snapshot_id) is None:
+        """Select relevant live-catalog evidence without executing a metered request."""
+        snapshot = self.store.get_site_snapshot(snapshot_id) if snapshot_id else None
+        if snapshot_id and snapshot is None:
             raise SandboxError("SiteSnapshot not found.")
         try:
             catalog = await self.client.meta_fields()
         except httpx.HTTPError as exc:
             raise MireyeUnavailableError("MIREYE field catalog is temporarily unavailable.") from exc
         presets = catalog.get("presets") or {}
-        preset_fields = presets.get(profile)
-        if not isinstance(preset_fields, list) or not preset_fields:
+        is_data_center = "data center" in str(project_type).casefold()
+        selected_profile = profile or (DATA_CENTER_SITING_PRESET if is_data_center else None)
+        preset_fields = presets.get(selected_profile, []) if selected_profile else []
+        if require_profile and (not isinstance(preset_fields, list) or not preset_fields):
             raise FieldCatalogError(f"Current MIREYE catalog lacks the {profile} preset.")
         metadata = {
             item["name"]: item for item in catalog.get("fields", [])
             if isinstance(item, dict) and item.get("name")
         }
-        supplemental = [name for name in DATA_CENTER_CONTEXT_FIELDS if name in metadata and name not in preset_fields]
-        fields = list(dict.fromkeys([*preset_fields, *supplemental]))
-        freshness = self.freshness_status(snapshot_id, now=now, fields=fields)
-        field_manifest = [{
-            "field": name,
-            "source": metadata.get(name, {}).get("source"),
-            "source_url": metadata.get(name, {}).get("source_url"),
-            "scope": metadata.get(name, {}).get("scope") or metadata.get(name, {}).get("spatial_scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(name),
-            "unit": metadata.get(name, {}).get("unit"),
-            "ttl_seconds": metadata.get(name, {}).get("ttl_seconds"),
-            "description": metadata.get(name, {}).get("description"),
-            "interpretation_hints": metadata.get(name, {}).get("interpretation_hints"),
-            "metadata_status": "AVAILABLE" if name in metadata else "PRESET_ONLY",
-            "decision_role": "DECISION_SUPPORT" if name in SITE_SNAPSHOT_FIELD_SCOPES else "CONTEXT",
-        } for name in fields]
+        requirement_ids = [item.get("constraint_id") for item in requirements or [] if item.get("constraint_id")]
+        broad_diligence = is_data_center and requested_decision in {"candidate_screening", "site_diligence", "project_readiness"}
+        domains = list(DATA_CENTER_EVIDENCE_DOMAINS if broad_diligence else ("identity",))
+        for requirement_id in requirement_ids:
+            domains.extend(REQUIREMENT_EVIDENCE_DOMAINS.get(requirement_id, ()))
+        domains = list(dict.fromkeys(domains))
+        domain_fields = [field for domain in domains for field in PROJECT_EVIDENCE_FIELDS[domain] if field in metadata]
+        usable_preset = list(preset_fields) if broad_diligence and isinstance(preset_fields, list) else []
+        fields = list(dict.fromkeys([*usable_preset, *domain_fields]))
+        supplemental = [name for name in fields if name not in usable_preset]
+        freshness = self.freshness_status(snapshot_id, now=now, fields=fields) if snapshot_id else {
+            "status": "MISSING_EVIDENCE", "fresh_fields": [], "refresh_fields": fields,
+            "stale_fields": [], "missing_fields": fields, "incompatible_fields": [], "deprecated_fields": [],
+            "refresh_required": bool(fields), "fields": [{"field": name, "classification": "missing", "reason": "No SiteSnapshot evidence exists yet."} for name in fields],
+        }
+        freshness_by_field = {item["field"]: item["classification"] for item in freshness["fields"]}
+        gap_requirements = {
+            gap.get("requirement_id") for gap in unresolved_gaps or [] if isinstance(gap, dict) and gap.get("requirement_id")
+        }
+        field_manifest = []
+        for name in fields:
+            field_metadata = metadata.get(name, {})
+            field_domains = [domain for domain in domains if name in PROJECT_EVIDENCE_FIELDS[domain]]
+            affected = [requirement_id for requirement_id in requirement_ids if set(field_domains) & set(REQUIREMENT_EVIDENCE_DOMAINS.get(requirement_id, ()))]
+            if not affected and name in usable_preset:
+                affected = sorted(gap_requirements or requirement_ids)
+            billing = field_metadata.get("billing") or {}
+            planned_semantics = _field_semantics(name, {"status": "ok", "value": "planned"}, field_metadata)
+            field_manifest.append({
+                "field": name,
+                "reason": f"Supports {', '.join(field_domains).replace('_', ' ') or 'data-center site'} evidence for {requested_decision.replace('_', ' ')}.",
+                "requirement_ids": affected,
+                "decision_impact": max((DOMAIN_IMPACT[domain] for domain in field_domains), default="MEDIUM", key=lambda value: ("LOW", "MEDIUM", "HIGH", "CRITICAL").index(value)),
+                "spatial_scope": _catalog_scope(name, field_metadata),
+                "freshness_required": {"policy": "PROVIDER_TTL", "ttl_seconds": field_metadata.get("ttl_seconds")},
+                "source": "MIREYE", "provider_source": field_metadata.get("source"),
+                "metered": billing.get("credits_per_location") is not None or billing.get("metered_group") is not None,
+                "billing": billing, "unit": field_metadata.get("unit"), "source_url": field_metadata.get("source_url"),
+                "semantic_strength": planned_semantics["semantic_strength"], "semantic_class": planned_semantics["semantic_class"],
+                "claim_limits": planned_semantics["claim_limits"], "catalog_presets": field_metadata.get("presets") or [],
+                "selection_status": freshness_by_field.get(name, "missing"),
+                "metadata_status": "AVAILABLE" if name in metadata else "PRESET_ONLY",
+            })
+        refresh_fields = freshness["refresh_fields"]
+        refresh_preset_fields = [name for name in refresh_fields if name in usable_preset]
+        use_preset = bool(selected_profile and len(refresh_preset_fields) > MIREYE_EXPLICIT_FIELD_LIMIT)
         return {
-            "profile": profile,
+            "project_type": project_type, "requested_decision": requested_decision,
+            "profile": selected_profile if usable_preset else None,
             "catalog_version": self._catalog_version(catalog),
-            "preset_fields": list(preset_fields),
+            "selected_presets": [selected_profile] if usable_preset else [],
+            "preset_fields": usable_preset,
             "supplemental_fields": supplemental,
             "fields": fields,
             "field_count": len(fields),
+            "refresh_fields": refresh_fields,
             "freshness": freshness,
             "field_manifest": field_manifest,
+            "request_strategy": {
+                "preset": selected_profile if use_preset else None,
+                "explicit_fields": sorted(set(refresh_fields) - (set(usable_preset) if use_preset else set())),
+                "reason": "Use the release-defined project preset when more than the explicit-field limit needs refresh; otherwise request only stale or missing fields.",
+            },
             "known_gaps": [{
                 "requested_field": "site_deliverable_grid_capacity_mw",
                 "reason": "A 100 MW phase and 300 MW expansion require utility-confirmed deliverability.",
@@ -791,8 +971,35 @@ class SiteSnapshotService:
                 ],
                 "status": "NOT_PROVEN_BY_CURRENT_CATALOG",
                 "decision_blocking": True,
+            }, {
+                "requested_field": "jurisdiction_aware_data_center_entitlement",
+                "reason": "Raw zoning does not establish permitted data-center use.",
+                "nearest_available_fields": ["parcel_zoning"], "status": "UNSUPPORTED_SEMANTICS", "decision_blocking": True,
+            }, {
+                "requested_field": "recorded_legal_access",
+                "reason": "Mapped-road proximity does not establish legal access or easements.",
+                "nearest_available_fields": ["nearest_major_road_distance_m", "nearest_major_road_name"],
+                "status": "UNSUPPORTED_SEMANTICS", "decision_blocking": True,
+            }, {
+                "requested_field": "provider_confirmed_water_capacity",
+                "reason": "Service-area context does not establish committed project capacity.",
+                "nearest_available_fields": ["within_water_service_area", "water_system_name"],
+                "status": "NOT_PROVEN_BY_CURRENT_CATALOG", "decision_blocking": True,
+            }, {
+                "requested_field": "carrier_confirmed_physically_diverse_routes",
+                "reason": "Provider availability does not establish route diversity.",
+                "nearest_available_fields": ["fiber_provider_count", "fiber_broadband_available"],
+                "status": "NOT_PROVEN_BY_CURRENT_CATALOG", "decision_blocking": False,
             }],
         }
+
+    async def project_intelligence_plan(
+        self, snapshot_id: str, *, profile: str = DATA_CENTER_SITING_PRESET, now: float | None = None,
+    ) -> dict:
+        return await self.catalog_evidence_plan(
+            project_type="Data center", requested_decision="site_diligence", snapshot_id=snapshot_id,
+            profile=profile, now=now, require_profile=True,
+        )
 
     async def _catalog_selection(self, fields: list[str]) -> tuple[list[str], dict]:
         catalog = await self.client.meta_fields()
@@ -930,6 +1137,8 @@ class SiteSnapshotService:
         status = str(record.get("status") or "ok").lower()
         if status not in {"ok", "absent"}:
             return "incompatible", f"Evidence status is not usable: {record.get('status')}."
+        if status == "ok" and record.get("value") is None:
+            return "missing", "Evidence value is missing."
         expected_scope = SITE_SNAPSHOT_FIELD_SCOPES.get(field)
         if expected_scope and record.get("scope") not in {expected_scope, None}:
             return "incompatible", f"Evidence scope is {record.get('scope')}, not {expected_scope}."
@@ -976,10 +1185,15 @@ class SiteSnapshotService:
             if changed:
                 changed_evidence_ids.append(field)
                 field_changes[field] = {
+                    "existence": {"before": before is not None, "after": after is not None},
                     "value": {"before": before.get("value") if isinstance(before, dict) else None, "after": after.get("value") if isinstance(after, dict) else None},
                     "status": {"before": before.get("status") if isinstance(before, dict) else None, "after": after.get("status") if isinstance(after, dict) else None},
                     "scope": {"before": before.get("scope") if isinstance(before, dict) else None, "after": after.get("scope") if isinstance(after, dict) else None},
                     "freshness": {"before": before.get("expires_at") if isinstance(before, dict) else None, "after": after.get("expires_at") if isinstance(after, dict) else None},
+                    "source": {
+                        "before": {key: before.get(key) for key in ("provider", "source", "source_url")} if isinstance(before, dict) else None,
+                        "after": {key: after.get(key) for key in ("provider", "source", "source_url")} if isinstance(after, dict) else None,
+                    },
                     "evidence_hash": {"before": before_hash, "after": after_hash},
                 }
         previous_geometry_hash, refreshed_geometry_hash = _hash(previous["geometry"]), _hash(refreshed["geometry"])
@@ -1071,11 +1285,13 @@ class SiteSnapshotService:
                 "value": record.get("value"),
                 "status": record.get("status", "absent" if source_record is None else "ok"),
                 "confidence": record.get("confidence"),
+                "provider": record.get("provider") or metadata.get("provider") or "MIREYE",
                 "source": record.get("source") or metadata.get("source"),
                 "source_url": record.get("source_url") or metadata.get("source_url"),
                 "unit": record.get("unit") or metadata.get("unit"),
                 "lifecycle": metadata.get("lifecycle"),
-                "scope": metadata.get("scope") or metadata.get("spatial_scope") or SITE_SNAPSHOT_FIELD_SCOPES.get(name),
+                "scope": _catalog_scope(name, metadata),
+                "spatial_scope": _catalog_scope(name, metadata),
                 "description": metadata.get("description"),
                 "interpretation_hints": metadata.get("interpretation_hints"),
                 "null_meaning": metadata.get("null_meaning"),
@@ -1083,9 +1299,12 @@ class SiteSnapshotService:
                 "presets": metadata.get("presets") or [],
                 "billing": metadata.get("billing"),
                 "ttl_seconds": ttl_seconds,
+                "fetched_at": observed_at,
                 "observed_at": observed_at,
                 "expires_at": observed_at + ttl_seconds,
+                "semantic_version": EVIDENCE_SEMANTIC_VERSION,
             }
+            normalized.update(_field_semantics(name, normalized, metadata))
             normalized["evidence_hash"] = _hash(normalized)
             evidence[name] = normalized
         return evidence

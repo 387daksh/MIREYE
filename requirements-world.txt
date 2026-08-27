@@ -1,1 +1,2 @@
-rasterio>=1.4,<2
+# Compatibility install only. `pyproject.toml` and `uv.lock` are authoritative.
+rasterio==1.4.4

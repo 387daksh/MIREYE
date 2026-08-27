@@ -4,7 +4,7 @@ import time
 
 import pytest
 
-from app.sandbox import ConfirmationRequired, REFRESH_IDENTITY_FIELDS, SiteSnapshotService, scene_state_from_snapshot
+from app.sandbox import ConfirmationRequired, REFRESH_IDENTITY_FIELDS, SandboxError, SiteSnapshotService, scene_state_from_snapshot
 from app.sandbox_agent import InMemorySandboxSessions, ModelReply, SandboxAgent
 from app.sandbox_scenarios import ScenarioService
 from app.workspace.store import WorkspaceStore
@@ -127,6 +127,8 @@ def test_refresh_creates_t2_and_re_evaluates_only_affected_scenario(lifecycle):
     assert runs[0]["evaluation"]["constraint_results"][0]["outcome"] == "FAIL"
     assert scenarios.get(scenario["scenario_id"])["site_snapshot_id"] == first["snapshot_id"]
     assert store.get_mireye_spend_plan(plan["spend_plan_id"])["status"] == "COMPLETED"
+    with pytest.raises(SandboxError, match="no longer available"):
+        _run(service.confirm_and_refresh(plan["spend_plan_id"], confirmed_by_application=True))
 
 
 def test_geometry_change_never_mutates_proposal_and_requires_rebase(lifecycle):

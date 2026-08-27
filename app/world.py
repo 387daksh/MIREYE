@@ -20,10 +20,13 @@ from PIL import Image
 from shapely import wkb
 from shapely.geometry import box, mapping, shape
 
+from app.infrastructure.observability import traced_async
+from app.infrastructure.storage import LocalArtifactStore
+from app.infrastructure.storage.artifacts import ArtifactIntegrityError
 from app.workspace.store import WorkspaceStore
 
 
-WORLD_SCHEMA_VERSION = "world_snapshot_v1"
+WORLD_SCHEMA_VERSION = "world_snapshot_v2"
 TERRAIN_ENCODING_VERSION = "mapbox_terrain_rgb_v1"
 TERRAIN_SAMPLING_VERSION = "pinned_dem_bilinear_v1"
 TERRAIN_MIN_ZOOM = 12
@@ -53,33 +56,12 @@ def usgs_vertical_reference(product: dict) -> str:
     return "NAVD88" if "NAVD88" in normalized else "UNKNOWN"
 
 
-class ArtifactStore:
-    def __init__(self, root: Path | str):
-        self.root = Path(root)
-        self.root.mkdir(parents=True, exist_ok=True)
-
-    def put(self, data: bytes, *, extension: str, media_type: str, role: str) -> dict:
-        digest = _sha256(data)
-        suffix = extension.lstrip(".")
-        relative = Path("sha256") / digest[:2] / f"{digest}.{suffix}"
-        path = self.root / relative
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not path.exists():
-            temporary = path.with_suffix(path.suffix + ".tmp")
-            temporary.write_bytes(data)
-            temporary.replace(path)
-        return {
-            "sha256": digest, "byte_size": len(data), "media_type": media_type,
-            "role": role, "storage_key": relative.as_posix(),
-        }
-
+class ArtifactStore(LocalArtifactStore):
     def path(self, artifact: dict) -> Path:
-        path = (self.root / artifact["storage_key"]).resolve()
-        if self.root.resolve() not in path.parents or not path.is_file():
-            raise WorldError("World artifact was not found.")
-        if _sha256(path.read_bytes()) != artifact["sha256"]:
-            raise WorldError("World artifact hash verification failed.")
-        return path
+        try:
+            return super().path(artifact)
+        except ArtifactIntegrityError as exc:
+            raise WorldError(str(exc)) from exc
 
 
 def parcel_aoi(geometry: dict, *, buffer_m: float = 1000.0) -> dict:
@@ -170,6 +152,7 @@ class USGSTerrainProvider:
     def __init__(self, *, max_download_bytes: int = 250_000_000):
         self.max_download_bytes = max_download_bytes
 
+    @traced_async("source.usgs.terrain")
     async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
         try:
             import rasterio
@@ -330,6 +313,7 @@ class USGSTerrainProvider:
 
 
 class OvertureRoadProvider:
+    @traced_async("source.overture.roads")
     async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
         release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
         if not OVERTURE_RELEASE_PATTERN.fullmatch(release):
@@ -391,6 +375,7 @@ def _polygon_geojson(table, bbox: list[float], properties: list[str]) -> dict:
 
 
 class OvertureBuildingProvider:
+    @traced_async("source.overture.buildings")
     async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
         release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
         if not OVERTURE_RELEASE_PATTERN.fullmatch(release):
@@ -446,6 +431,7 @@ class OverturePolygonProvider:
     def __init__(self, layer: str, source_type: str):
         self.layer, self.source_type = layer, source_type
 
+    @traced_async("source.overture.context")
     async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
         release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
         if not OVERTURE_RELEASE_PATTERN.fullmatch(release):
@@ -570,8 +556,17 @@ class WorldSnapshotService:
                 "layer": "transmission", "availability": "UNAVAILABLE", "quality_state": "SOURCE_UNVERIFIED",
                 "source": None, "artifacts": {}, "warnings": ["No current release-pinned transmission geometry source with verified distribution metadata is configured. MIREYE proximity evidence remains available."], "conflicts": [],
             })
+        for item in built:
+            item.update({
+                "origin": "OBSERVED", "aoi": query_aoi,
+                "crs": "EPSG:3857" if item["layer"] == "terrain" else "OGC:CRS84",
+                "freshness": {"policy": "PINNED_SOURCE_ARTIFACT", "state": "PINNED" if item.get("availability") == "AVAILABLE" else "UNAVAILABLE"},
+            })
         source_manifest = [{
             "layer": item["layer"], "source": item["source"],
+            "availability": item["availability"], "quality_state": item["quality_state"],
+            "aoi": query_aoi, "spatial_reference": item["crs"],
+            "license": (item.get("source") or {}).get("license"),
             "artifact_hashes": {name: artifact["sha256"] for name, artifact in sorted(item.get("artifacts", {}).items())},
         } for item in built if item.get("source")]
         content = {

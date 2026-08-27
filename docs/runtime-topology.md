@@ -1,0 +1,9 @@
+# Runtime topology
+
+PostgreSQL is authoritative for project, evidence, snapshot, orchestration, outbox, and processed-event state. Temporal owns durable workflow execution. NATS JetStream propagates committed domain events. Redis contains TTL-bound cache and ephemeral coordination only.
+
+The `MIREYE` JetStream stream retains `mireye.>` subjects. `mireye-project-events-v1` is an explicit-ack durable consumer starting from all retained events. Delivery is at least once. Publishers attach `Nats-Msg-Id=event_id`; consumers also claim `(consumer_name,event_id)` in PostgreSQL before invoking handlers and acknowledge only after completion is recorded. Failures release the claim and negatively acknowledge with backoff. Delivery is attempted up to five times; no automatic dead-letter stream is currently implemented, so exhausted deliveries require operator inspection and replay.
+
+Temporal uses namespace `default`, task queue `mireye`, and endpoint `temporal:7233` in Compose. The auto-setup service persists Temporal and visibility schemas in the Compose PostgreSQL service and the named `postgres_data` volume. `AIOrchestrationWorkflow` invokes bounded `begin`, `advance`, and `resume` activities with five attempts, exponential backoff from one to thirty seconds, and waits on the `decision_answered` signal without polling. The API and worker both set `WORKFLOW_BACKEND=temporal`; production settings reject an implicit local-workflow fallback.
+
+Health contracts are dependency-aware: the API checks PostgreSQL, Redis, S3/MinIO, and Temporal reachability; the Temporal worker starts readiness only after its SDK connection succeeds; event publisher and consumer readiness probe PostgreSQL and NATS. The MinIO initializer is a one-shot readiness gate whose successful exit proves the bucket exists. No health path calls MIREYE or another paid provider.

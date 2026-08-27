@@ -1,23 +1,23 @@
-import os
 from pathlib import Path
-from dotenv import load_dotenv
+
+from app.infrastructure.config import get_settings
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+_settings = get_settings()
 
-MIREYE_API_KEY = os.environ.get("MIREYE_API_KEY", "")
-MIREYE_BASE_URL = os.environ.get("MIREYE_BASE_URL", "https://api.mireye.com")
-OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
-SANDBOX_AGENT_MODEL = os.environ.get("SANDBOX_AGENT_MODEL", "gpt-5.6-sol")
-SANDBOX_AGENT_REASONING_EFFORT = os.environ.get("SANDBOX_AGENT_REASONING_EFFORT", "high")
-MIREYE_ENRICHMENT_BATCH_SIZE = int(os.environ.get("MIREYE_ENRICHMENT_BATCH_SIZE", "2"))
+MIREYE_API_KEY = _settings.mireye_api_key.get_secret_value()
+MIREYE_BASE_URL = _settings.mireye_base_url
+OPENAI_API_KEY = _settings.openai_api_key.get_secret_value()
+SANDBOX_AGENT_MODEL = _settings.sandbox_agent_model
+SANDBOX_AGENT_REASONING_EFFORT = _settings.sandbox_agent_reasoning_effort
+MODEL_PRICING = _settings.model_pricing
+MIREYE_ENRICHMENT_BATCH_SIZE = _settings.mireye_enrichment_batch_size
 
-
-DATA_MODE = "live" if MIREYE_API_KEY else "local"
+DATA_MODE = _settings.data_mode
 
 PARQUET_DIR = ROOT / "app" / "data" / "parquet"
-WORKSPACE_DB = Path(os.environ.get("WORKSPACE_DB", ROOT / "app" / "data" / "workspaces.db"))
-WORLD_ASSET_DIR = Path(os.environ.get("WORLD_ASSET_DIR", ROOT / "app" / "data" / "world-assets"))
+WORKSPACE_DB = _settings.workspace_db
+WORLD_ASSET_DIR = _settings.world_asset_dir
 
 # Fixes bug (C) from the ideation doc: instead of silently dropping fields
 # past this cap, we paginate and tell the caller explicitly.

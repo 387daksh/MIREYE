@@ -124,6 +124,8 @@ TOOLS_REGISTRY = [
 
 async def execute_tool(tool_name: str, arguments: dict[str, Any]) -> dict:
     """Execute an MCP tool call."""
+    if tool_name.startswith("workspace_"):
+        workspace_store.initialize()
     if tool_name == "screen_parcels":
         candidates = spatial_discovery.search_candidates(
             min_acreage=arguments.get("min_acreage"),

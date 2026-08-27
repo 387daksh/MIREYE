@@ -17,9 +17,12 @@
   const projectAgent = document.getElementById("projectAgent");
   const agentDecision = document.getElementById("agentDecision");
   const candidateResolution = document.getElementById("candidateResolution");
+  const projectIntelligence = document.getElementById("projectIntelligence");
   let activeMessage = "";
-  let activeProjectId = null;
-  let activeProjectDecision = null;
+    let activeProjectId = null;
+    let activeProjectDecision = null;
+    let pendingCheckPlan = null;
+  const refreshedSourceSites = new Set();
   const projectAgentSessionId = `diligence-${crypto.randomUUID()}`;
 
   const statusLabel = {
@@ -38,6 +41,7 @@
     projectAgent.hidden = true;
     agentDecision.hidden = true;
     candidateResolution.hidden = true;
+    projectIntelligence.hidden = true;
     document.getElementById("requestSummary").hidden = true;
     renderStages([
       { id: "understand", label: "Understanding request", status: "active" },
@@ -132,6 +136,118 @@
     results.hidden = false;
   }
 
+  function renderProjectIntelligence(project) {
+    const intelligence = project.project_intelligence;
+    if (!intelligence?.active_site) {
+      projectIntelligence.hidden = true;
+      return;
+    }
+    const capacity = project.request?.capacity_mw;
+    document.getElementById("projectIntelligenceTitle").textContent = capacity
+      ? `${capacity} MW ${project.request.project || "physical project"}`
+      : project.request?.project || "Physical project";
+    document.getElementById("projectReadinessState").textContent = intelligence.project_readiness_state.replaceAll("_", " ");
+    document.getElementById("projectReadiness").replaceChildren(...Object.entries(intelligence.readiness).map(([domain, value]) => {
+      const item = document.createElement("div");
+      item.innerHTML = `<span>${escapeHtml(domain)}</span><strong class="readiness-${value.status.toLowerCase()}">${escapeHtml(value.status)}</strong>`;
+      return item;
+    }));
+      renderReadinessModule("powerReadiness", "powerReadinessState", intelligence.power_readiness);
+      renderReadinessModule("entitlementReadiness", "entitlementState", intelligence.entitlement);
+      renderProjectChanges(project.project_id);
+    const evidenceById = new Map(intelligence.evidence_items.map((item) => [item.evidence_id, item]));
+    const known = intelligence.evidence_coverage.filter((item) => item.decision_provable || item.evidence_available);
+    document.getElementById("projectKnown").replaceChildren(...known.map((item) => {
+      const details = document.createElement("details");
+      const sources = item.evidence_ids.map((id) => evidenceById.get(id)).filter(Boolean);
+      details.innerHTML = `<summary><span>${escapeHtml(item.title)}</span>${outcomeBadge(item.status)}</summary>
+        <p>${escapeHtml(item.outcome_explanation)}</p>
+        ${sources.map((source) => `<small>${escapeHtml(String(source.semantic_strength || "SOURCE_BACKED_SIGNAL").replaceAll("_", " "))} · ${escapeHtml(source.source || "MIREYE source")} · ${escapeHtml(source.scope || "scope unavailable")} · ${source.expires_at ? `fresh until ${escapeHtml(new Date(source.expires_at * 1000).toLocaleString())}` : "freshness unavailable"}</small>`).join("")}`;
+      return details;
+    }));
+    document.getElementById("projectBlockers").replaceChildren(...intelligence.unresolved_issues.map((gap) => {
+      const details = document.createElement("details");
+      details.innerHTML = `<summary><span>${escapeHtml(gap.title)}</span><strong>${escapeHtml(gap.impact)}</strong></summary>
+        <p>${escapeHtml(gap.description)}</p><small>${escapeHtml(gap.why_it_matters)}</small>
+        <dl><dt>Needed</dt><dd>${escapeHtml(gap.missing_evidence.join(", ") || "Authoritative confirmation")}</dd><dt>Who can resolve it</dt><dd>${escapeHtml(gap.responsible_party)}</dd></dl>`;
+      return details;
+    }));
+    document.getElementById("projectActions").replaceChildren(...intelligence.recommended_actions.slice(0, 5).map((action) => {
+      const item = document.createElement("li");
+      const canDraft = action.type.endsWith("_RFI") && action.status !== "DRAFTED";
+      item.innerHTML = `<div><strong>${escapeHtml(action.title)}</strong><small>${escapeHtml(action.expected_impact)} impact · ${escapeHtml(action.recipient_category)}</small></div>${canDraft ? `<button type="button" data-action-id="${escapeHtml(action.action_id)}">Draft request</button>` : ""}`;
+      return item;
+    }));
+    document.querySelectorAll("#projectActions [data-action-id]").forEach((button) => button.addEventListener("click", () => draftProjectRfi(button.dataset.actionId)));
+    const rfiList = document.getElementById("projectRfiList");
+    rfiList.replaceChildren(...(project.rfis || []).map((rfi) => {
+      const details = document.createElement("details");
+      details.innerHTML = `<summary>${escapeHtml(rfi.type.replaceAll("_", " "))}</summary><p>${escapeHtml(rfi.generated_request)}</p><small>Draft only · approval required before sending</small>`;
+      return details;
+    }));
+    document.getElementById("projectRfis").hidden = !(project.rfis || []).length;
+    projectIntelligence.hidden = false;
+      refreshProjectSources(project);
+    }
+
+    async function renderProjectChanges(projectId) {
+      const section = document.getElementById("projectChanges");
+      try {
+        const payload = await get(`/v1/diligence/projects/${encodeURIComponent(projectId)}/changes?limit=5`);
+        document.getElementById("projectChangeCount").textContent = `${payload.material_change_count} material`;
+        document.getElementById("projectChangeSummary").textContent = payload.change_count
+          ? `${payload.material_change_count} material change${payload.material_change_count === 1 ? "" : "s"} since the last refresh.`
+          : "No source changes have been recorded yet.";
+        document.getElementById("projectChangeList").replaceChildren(...payload.items.map((change) => {
+          const item = document.createElement("article");
+          item.className = "project-change-item";
+          item.innerHTML = `<strong>${escapeHtml(change.significance)} · ${escapeHtml(change.what_changed)}</strong><p>${escapeHtml(change.why_it_matters)}</p><small>${escapeHtml(change.what_happens_next)}</small>`;
+          return item;
+        }));
+        section.hidden = false;
+      } catch (_error) {
+        section.hidden = true;
+      }
+    }
+
+  function readinessValue(item) {
+    if (item.value == null) return "Not established";
+    if (typeof item.value === "object") return Object.entries(item.value).slice(0, 3).map(([key, value]) => `${key.replaceAll("_", " ")}: ${value}`).join(" · ");
+    return `${item.value}${item.unit ? ` ${item.unit}` : ""}`;
+  }
+
+  function renderReadinessModule(containerId, stateId, state) {
+    const container = document.getElementById(containerId);
+    const badge = document.getElementById(stateId);
+    badge.textContent = state?.readiness_state || "UNAVAILABLE";
+    badge.className = `readiness-${String(state?.readiness_state || "unavailable").toLowerCase()}`;
+    const evidence = new Map((state?.evidence_details || []).map((item) => [item.evidence_id, item]));
+    container.replaceChildren(...(state?.items || []).map((item) => {
+      const details = document.createElement("details");
+      const sources = (item.evidence_ids || []).map((id) => evidence.get(id)).filter(Boolean);
+      details.innerHTML = `<summary><span>${escapeHtml(item.label)}</span><strong class="readiness-${escapeHtml(item.state.toLowerCase())}">${escapeHtml(item.state)}</strong></summary>
+        <p>${escapeHtml(readinessValue(item))}</p><small>${escapeHtml(item.explanation)}</small>
+        ${sources.map((source) => `<div class="source-reference">${source.source_url ? `<a href="${encodeURI(source.source_url)}" target="_blank" rel="noreferrer">${escapeHtml(source.provider)} · View evidence</a>` : `<span>${escapeHtml(source.provider)} · ${escapeHtml(source.dataset || "Source")}</span>`}<span>${escapeHtml(source.section_reference || source.dataset)} · ${escapeHtml(source.scope)} · ${escapeHtml(source.freshness || "freshness unavailable")}${source.human_review_required ? " · Human review required" : ""}</span></div>`).join("")}`;
+      return details;
+    }));
+  }
+
+  async function refreshProjectSources(project) {
+    const siteId = project.project_intelligence?.active_site?.site_id;
+    if (!siteId || refreshedSourceSites.has(siteId)) return;
+    const current = project.external_evidence_by_site?.[siteId];
+    if (current?.sources?.length) return;
+    refreshedSourceSites.add(siteId);
+    try {
+      const result = await post(`/v1/diligence/projects/${encodeURIComponent(project.project_id)}/sites/${encodeURIComponent(siteId)}/sources/refresh`, {});
+      const updated = await get(`/v1/diligence/projects/${encodeURIComponent(project.project_id)}`);
+      renderDiligenceProject(updated);
+      document.getElementById("projectAgentResponse").textContent = `${result.source_result.sources.filter((item) => item.availability === "AVAILABLE").length} authoritative public sources checked.`;
+    } catch (error) {
+      document.getElementById("projectAgentResponse").textContent = `Public-source check unavailable: ${error.message}`;
+    }
+  }
+
   function renderResponse(payload) {
     activeProjectId = null;
     activeProjectDecision = null;
@@ -147,6 +263,7 @@
     projectAgent.hidden = true;
     agentDecision.hidden = true;
     candidateResolution.hidden = true;
+    projectIntelligence.hidden = true;
     if (payload.status === "DISCOVERY_UNAVAILABLE") {
       showNotice("Start with a specific property", payload.message, "warning");
       propertyHandoff.hidden = false;
@@ -220,6 +337,7 @@
     results.hidden = true;
     agentDecision.hidden = true;
     candidateResolution.hidden = true;
+    projectIntelligence.hidden = true;
     const resolved = project.candidates.filter((item) => ["RESOLVED", "ENRICHED"].includes(item.reconciliation_status)).length;
     renderCandidateResolution(project);
     if (activeProjectDecision) {
@@ -273,6 +391,7 @@
           sandbox_url: summary.sandbox_url || "#", checks: ranked.constraint_results.map((item) => ({ label: constraintName(item.constraint_id), outcome: item.outcome, reason: item.explanation })),
         };
       }));
+      renderProjectIntelligence(project);
       projectAgent.hidden = false;
       if (project.decision?.status === "DECISION_READY") {
         showNotice("MIREYE shortlist ready", `${project.ranking.length} supplied candidates were ranked from deterministic evidence outcomes.`, "success");
@@ -502,6 +621,22 @@
     }
   }
 
+  async function draftProjectRfi(actionId) {
+    if (!activeProjectId) return;
+    const response = document.getElementById("projectAgentResponse");
+    response.textContent = "Preparing an evidence-specific request...";
+    try {
+      const result = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/chat`, {
+        message: `Draft the request for the validated next action ${actionId}. Use its required evidence and recipient category. Do not invent costs, timelines, or confirmed facts.`,
+        session_id: projectAgentSessionId,
+      });
+      response.textContent = result.message;
+      if (result.project) renderDiligenceProject(result.project);
+    } catch (error) {
+      response.textContent = error.message;
+    }
+  }
+
   async function watchProject() {
     if (!activeProjectId) return;
     const state = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/watch`, { enabled: true });
@@ -509,11 +644,28 @@
   }
 
   async function checkProject() {
-    if (!activeProjectId) return;
-    const state = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/check-now`, {});
-    const stale = state.candidate_states.filter((item) => item.status !== "CURRENT").length;
-    document.getElementById("projectAgentResponse").textContent = stale ? `${stale} candidate${stale === 1 ? " needs" : "s need"} a MIREYE refresh quote.` : "All saved candidate evidence is currently fresh.";
-  }
+      if (!activeProjectId) return;
+      const button = document.getElementById("checkProject");
+      if (pendingCheckPlan) {
+        const result = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/check-now`, {
+          candidate_id: pendingCheckPlan.candidate_id, spend_plan_id: pendingCheckPlan.spend_plan_id, confirmed: true,
+        });
+        pendingCheckPlan = null;
+        button.textContent = "Check freshness";
+        document.getElementById("projectAgentResponse").textContent = `MIREYE refreshed the site. ${result.impact_summary.material_change_count} material change${result.impact_summary.material_change_count === 1 ? "" : "s"} found.`;
+        renderDiligenceProject(await get(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}`));
+        return;
+      }
+      const state = await post(`/v1/diligence/projects/${encodeURIComponent(activeProjectId)}/check-now`, { candidate_id: null, spend_plan_id: null, confirmed: false });
+      if (state.status === "CURRENT") {
+        document.getElementById("projectAgentResponse").textContent = "All saved candidate evidence is currently fresh.";
+        return;
+      }
+      pendingCheckPlan = state.refresh_plans[0];
+      const credits = pendingCheckPlan.expected_credits == null ? "an unpriced amount" : `${pendingCheckPlan.expected_credits} credits`;
+      document.getElementById("projectAgentResponse").textContent = `${pendingCheckPlan.requested_fields.length} fields need refresh. MIREYE estimates ${credits}. Click again to confirm.`;
+      button.textContent = "Confirm MIREYE refresh";
+    }
 
   function submitPropertyHandoff(event) {
     event.preventDefault();

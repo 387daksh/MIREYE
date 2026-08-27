@@ -316,6 +316,7 @@ def test_world_snapshot_api_uses_existing_site_and_returns_render_contract(monke
     import app.main as main
 
     site = site_snapshot("site-world-api-test")
+    main.workspace_store.initialize()
     main.workspace_store.create_site_snapshot(site)
     monkeypatch.setattr(main.world_service, "terrain_provider", FixtureTerrainProvider())
     monkeypatch.setattr(main.world_service, "road_provider", FixtureRoadProvider())

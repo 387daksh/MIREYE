@@ -14,34 +14,76 @@ Exposes the unified spatial core:
 """
 from __future__ import annotations
 
+import asyncio
+import re
+from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, Literal
-from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from app.discovery.confidence import rank_shortlist_by_confidence, score_site
-from app.config import WORLD_ASSET_DIR
 from app.diligence import DiligenceError, DiligenceService
-from app.discovery.screen import DiscoveryEngine, FilterRule
+from app.discovery.screen import DiscoveryEngine
 from app.discovery.spatial import SpatialDiscovery
 from app.grid.ici import ICIEngine
+from app.infrastructure.config import get_settings
+from app.infrastructure.cache import RedisCache
+from app.infrastructure.auth import LocalAuthProvider, RequestContext, request_context
+from app.infrastructure.db import workspace_store_for
+from app.infrastructure.observability import configure_observability, install_http_observability
+from app.infrastructure.storage import artifact_store_for
+from app.ai.evaluation import VerificationEngine
+from app.ai.memory import ProjectMemoryStore
+from app.ai.planners import IntentInterpreter, TaskGraphPlanner
+from app.ai.providers import OpenAIStructuredModelProvider
+from app.ai.runtime import OrchestrationEngine, OrchestrationError, build_project_tool_registry
+from app.ai.schemas.orchestration import OrchestrationRun
+from app.application.orchestration.temporal import TemporalOrchestrationExecutor
 from app.mireye_client import MireyeClient
 from app.product import ProductExperienceService, ProductRequestError
+from app.project_readiness import AuthoritativeSourceService
 from app.sandbox_agent import ModelUnavailableError, SandboxAgent, ToolValidationError
 from app.sandbox_evaluator import SceneValidationError, evaluate_site
 from app.sandbox_scenarios import ScenarioError, ScenarioService
 from app.sandbox import ConfirmationRequired, MireyeUnavailableError, ParcelIdentityError, SandboxError, SiteSnapshotService
 from app.workspace.engine import WorkspaceEngine
-from app.workspace.store import WorkspaceStore
-from app.world import ArtifactStore, WorldError, WorldSnapshotService
+from app.world import WorldError, WorldSnapshotService
+
+
+@asynccontextmanager
+async def application_lifespan(_app: FastAPI):
+    settings = get_settings()
+    configure_observability(settings)
+    workspace_store.initialize()
+    try:
+        await cache.ping()
+    except Exception:
+        if settings.app_env == "production":
+            raise
+    try:
+        yield
+    finally:
+        await cache.close()
 
 app = FastAPI(
     title="Mireye Agentic Siting & Spatial Intelligence Platform",
     description="Transforms Mireye from a single-point verification tool into an autonomous enterprise site origination engine.",
     version="1.0.0",
+    lifespan=application_lifespan,
 )
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=get_settings().cors_origins,
+    allow_credentials=True,
+    allow_methods=["GET", "POST"],
+    allow_headers=["Authorization", "Content-Type", "X-Mireye-User-Id", "X-Mireye-Organization-Id", "X-Mireye-Workspace-Id", "X-Mireye-Roles"],
+)
+install_http_observability(app)
+auth_provider = LocalAuthProvider()
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 if STATIC_DIR.exists():
@@ -65,17 +107,121 @@ async def serve_sandbox(snapshot_id: str):
 
 # Global core singletons
 mireye_client = MireyeClient()
-workspace_store = WorkspaceStore()
+_settings = get_settings()
+cache = RedisCache(_settings.redis_url)
+temporal_executor = TemporalOrchestrationExecutor(_settings.temporal_target, _settings.temporal_namespace, _settings.temporal_task_queue) if _settings.workflow_backend == "temporal" and _settings.temporal_target else None
+workspace_store = workspace_store_for(_settings)
+artifact_store = artifact_store_for(_settings)
 workspace_engine = WorkspaceEngine(store=workspace_store, client=mireye_client)
-world_service = WorldSnapshotService(workspace_store, ArtifactStore(WORLD_ASSET_DIR))
+world_service = WorldSnapshotService(workspace_store, artifact_store)
 scenario_service = ScenarioService(workspace_store, worlds=world_service)
 sandbox_service = SiteSnapshotService(store=workspace_store, client=mireye_client, scenarios=scenario_service)
-diligence_service = DiligenceService(workspace_store, sandbox_service, world_service)
+diligence_service = DiligenceService(workspace_store, sandbox_service, world_service, sources=AuthoritativeSourceService())
 sandbox_agent = SandboxAgent(scenarios=scenario_service, intelligence=sandbox_service, diligence=diligence_service)
+orchestration_model = OpenAIStructuredModelProvider()
+orchestration_tools = build_project_tool_registry(diligence_service, scenario_service)
+orchestration_engine = OrchestrationEngine(
+    diligence_service,
+    IntentInterpreter(orchestration_model),
+    TaskGraphPlanner(orchestration_model),
+    orchestration_tools,
+    ProjectMemoryStore(workspace_store),
+    VerificationEngine(),
+)
 product_service = ProductExperienceService(sandbox_service, world_service)
 spatial_discovery = SpatialDiscovery()
 ici_engine = ICIEngine()
 discovery_engine = DiscoveryEngine(client=mireye_client)
+
+
+@app.middleware("http")
+async def authorize_application_request(request, call_next):
+    try:
+        context = await auth_provider.authenticate(request.headers)
+    except (PermissionError, ValueError) as exc:
+        return JSONResponse({"detail": str(exc)}, status_code=401)
+    request.state.context = context
+    permission = _permission_for(request.method, request.url.path)
+    if permission and not context.allows(permission):
+        return JSONResponse({"detail": f"Missing permission: {permission}"}, status_code=403)
+    owner = await _request_workspace(request)
+    if context.workspace_id is not None and owner is not None and owner != context.workspace_id:
+        return JSONResponse({"detail": "Resource does not belong to the request workspace."}, status_code=403)
+    return await call_next(request)
+
+
+def _permission_for(method: str, path: str) -> str | None:
+    if not path.startswith("/v1/"):
+        return None
+    if "/orchestration" in path:
+        return "project:read" if method == "GET" else "orchestration:run"
+    if "/rfis" in path:
+        if path.endswith("/approve"):
+            return "rfi:approve"
+        if path.endswith("/send"):
+            return "rfi:send"
+        return "rfi:create"
+    if "/sources/refresh" in path or "/refresh" in path or path.endswith("/enrich") or path.endswith("/check-now"):
+        return "evidence:refresh"
+    if "/evidence" in path or "/intelligence" in path or "/power-readiness" in path or "/entitlement" in path:
+        return "evidence:read"
+    if path.endswith("/compare"):
+        return "scenario:read"
+    if "/scenarios" in path:
+        return "scenario:read" if method == "GET" else "scenario:mutate"
+    if "/world-snapshots" in path:
+        return "evidence:read" if method == "GET" else "evidence:refresh"
+    if path.startswith("/v1/diligence/projects"):
+        return "project:read" if method == "GET" else "project:write"
+    if path.startswith("/v1/workspace"):
+        return "project:read" if method == "GET" else "workspace:admin"
+    if path.startswith("/v1/sandbox"):
+        return "evidence:read" if method == "GET" else "scenario:mutate"
+    return None
+
+
+def _resource_workspace(path: str) -> str | None:
+    match = re.search(r"/diligence/projects/([^/]+)", path)
+    if match:
+        project = diligence_service.store.get_diligence_project(match.group(1))
+        return project.get("workspace_id") if project else None
+    match = re.search(r"/workspace/([^/]+)", path)
+    if match and match.group(1) not in {"open", "observe"}:
+        return match.group(1)
+    match = re.search(r"/world-snapshots/([^/]+)", path)
+    if match and (world := world_service.store.get_world_snapshot(match.group(1))):
+        snapshot = world_service.store.get_site_snapshot(world["site_snapshot_id"])
+        return snapshot.get("workspace_id") if snapshot else None
+    match = re.search(r"/scenarios/([^/]+)", path)
+    if match and (scenario := scenario_service.store.get_scenario_version(match.group(1))):
+        return scenario.get("workspace_id")
+    match = re.search(r"/site/(?:snapshots/)?([^/]+)", path)
+    if match and (snapshot := sandbox_service.store.get_site_snapshot(match.group(1))):
+        return snapshot.get("workspace_id")
+    match = re.search(r"/sandbox/([^/]+)", path)
+    if match and match.group(1) not in {"compare", "world-snapshots", "scenarios"}:
+        snapshot = sandbox_service.store.get_site_snapshot(match.group(1))
+        return snapshot.get("workspace_id") if snapshot else None
+    return None
+
+
+async def _request_workspace(request) -> str | None:
+    owner = _resource_workspace(request.url.path)
+    if owner is not None or request.method == "GET":
+        return owner
+    try:
+        body = await request.json()
+    except Exception:
+        return None
+    if isinstance(body, dict) and body.get("workspace_id"):
+        return str(body["workspace_id"])
+    if isinstance(body, dict) and body.get("site_snapshot_id"):
+        snapshot = sandbox_service.store.get_site_snapshot(str(body["site_snapshot_id"]))
+        return snapshot.get("workspace_id") if snapshot else None
+    if isinstance(body, dict) and body.get("left_scenario_id"):
+        scenario = scenario_service.store.get_scenario_version(str(body["left_scenario_id"]))
+        return scenario.get("workspace_id") if scenario else None
+    return None
 
 
 # -----------------------------------------------------------------------------
@@ -98,6 +244,10 @@ class ScreenRequest(BaseModel):
     owner_types: list[str] | None = None
     limit: int = Field(default=50, ge=1, le=500)
     apply_confidence_scoring: bool = True
+
+
+class OrchestrationRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=20_000)
 
 
 class AskRequest(BaseModel):
@@ -209,6 +359,7 @@ class DiligenceProjectCreateRequest(BaseModel):
 
 class DiligencePlanRequest(BaseModel):
     confirmed_resolution: bool = False
+    retry_reason: str | None = Field(default=None, min_length=8, max_length=500)
 
 
 class DiligenceEnrichmentConfirmRequest(BaseModel):
@@ -224,6 +375,12 @@ class DiligenceWatchRequest(BaseModel):
     enabled: bool = True
 
 
+class DiligenceCheckNowRequest(BaseModel):
+    candidate_id: str | None = None
+    spend_plan_id: str | None = None
+    confirmed: bool = False
+
+
 class DiligenceCompareRequest(BaseModel):
     candidate_ids: list[str] = Field(min_length=2, max_length=100)
 
@@ -231,6 +388,10 @@ class DiligenceCompareRequest(BaseModel):
 class DiligenceRefreshConfirmRequest(BaseModel):
     spend_plan_id: str
     confirmed: bool = False
+
+
+class DiligenceWorldSnapshotRequest(BaseModel):
+    requested_layers: list[str] | None = None
 
 
 class DiligenceChatRequest(BaseModel):
@@ -242,6 +403,11 @@ class DiligenceChatRequest(BaseModel):
     confirmed_ask_candidate_id: str | None = None
 
 
+class DiligenceRfiDraftRequest(BaseModel):
+    action_id: str = Field(min_length=1, max_length=128)
+    generated_request: str = Field(min_length=40, max_length=8000)
+
+
 class AgentDecisionAnswerRequest(BaseModel):
     resume_token: str = Field(min_length=1, max_length=128)
     option_id: str | None = Field(default=None, max_length=128)
@@ -249,6 +415,14 @@ class AgentDecisionAnswerRequest(BaseModel):
     value: Any = None
     text: str | None = Field(default=None, max_length=4000)
     cancelled: bool = False
+
+
+def require_orchestration_workspace(project_id: str, context: RequestContext, permission: str) -> None:
+    project = diligence_service.get(project_id)
+    if not context.allows(permission):
+        raise HTTPException(status_code=403, detail=f"Missing permission: {permission}")
+    if context.workspace_id is not None and project["workspace_id"] != context.workspace_id:
+        raise HTTPException(status_code=403, detail="Project does not belong to the request workspace.")
 
 
 # -----------------------------------------------------------------------------
@@ -315,7 +489,9 @@ async def list_diligence_candidates(project_id: str, cursor: str | None = None, 
 @app.post("/v1/diligence/projects/{project_id}/plan")
 async def plan_diligence_project(project_id: str, req: DiligencePlanRequest):
     try:
-        return await diligence_service.resolve_and_quote(project_id, confirmed_resolution=req.confirmed_resolution)
+        return await diligence_service.resolve_and_quote(
+            project_id, confirmed_resolution=req.confirmed_resolution, retry_reason=req.retry_reason,
+        )
     except ConfirmationRequired as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (DiligenceError, SandboxError) as exc:
@@ -363,6 +539,18 @@ async def open_diligence_candidate(project_id: str, candidate_id: str):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/v1/diligence/projects/{project_id}/candidates/{candidate_id}/world-snapshot")
+async def build_diligence_candidate_world(
+    project_id: str, candidate_id: str, req: DiligenceWorldSnapshotRequest,
+):
+    try:
+        return await diligence_service.build_world_snapshot(
+            project_id, candidate_id, requested_layers=req.requested_layers,
+        )
+    except (DiligenceError, WorldError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.post("/v1/diligence/projects/{project_id}/watch")
 async def watch_diligence_project(project_id: str, req: DiligenceWatchRequest):
     try:
@@ -380,10 +568,87 @@ async def compare_diligence_candidates(project_id: str, req: DiligenceCompareReq
 
 
 @app.post("/v1/diligence/projects/{project_id}/check-now")
-async def check_diligence_project(project_id: str):
+async def check_diligence_project(project_id: str, req: DiligenceCheckNowRequest | None = None):
     try:
-        return diligence_service.check_now(project_id)
+        req = req or DiligenceCheckNowRequest()
+        return await diligence_service.check_now_workflow(
+            project_id, candidate_id=req.candidate_id, spend_plan_id=req.spend_plan_id, confirmed=req.confirmed,
+        )
+    except ConfirmationRequired as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/changes")
+async def get_diligence_project_changes(
+    project_id: str, site: str | None = None, severity: str | None = None,
+    source: str | None = None, change_type: str | None = None,
+    affected_requirement: str | None = None, since: float | None = None,
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    try:
+        return diligence_service.changes(
+            project_id, site_id=site, significance=severity, source=source, change_type=change_type,
+            requirement_id=affected_requirement, since=since, limit=limit,
+        )
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/intelligence")
+async def get_diligence_project_intelligence(project_id: str):
+    try:
+        return diligence_service.evaluate_evidence_coverage(project_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/evidence-plan")
+async def get_diligence_project_evidence_plan(project_id: str):
+    try:
+        return await diligence_service.plan_project_evidence(project_id)
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/sites/{site_id}/sources/refresh")
+async def refresh_diligence_site_sources(project_id: str, site_id: str):
+    try:
+        return await diligence_service.refresh_authoritative_sources(project_id, site_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/sites/{site_id}/power-readiness")
+async def get_diligence_power_readiness(project_id: str, site_id: str):
+    try:
+        return diligence_service.power_readiness(project_id, site_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/sites/{site_id}/entitlement")
+async def get_diligence_entitlement(project_id: str, site_id: str):
+    try:
+        return diligence_service.entitlement_state(project_id, site_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/next-actions")
+async def prioritize_diligence_project_actions(project_id: str):
+    try:
+        return diligence_service.next_actions(project_id)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/rfis")
+async def create_diligence_project_rfi(project_id: str, req: DiligenceRfiDraftRequest):
+    try:
+        return diligence_service.create_rfi_draft(project_id, req.action_id, req.generated_request)
+    except DiligenceError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -421,6 +686,64 @@ async def chat_diligence_project(project_id: str, req: DiligenceChatRequest):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/v1/ai/projects/{project_id}/orchestrate")
+async def orchestrate_project(project_id: str, req: OrchestrationRequest, context: RequestContext = Depends(request_context)):
+    try:
+        require_orchestration_workspace(project_id, context, "orchestration:run")
+        if temporal_executor:
+            import uuid
+            run_id = f"run_{uuid.uuid4().hex}"
+            await temporal_executor.start(project_id, req.message, run_id)
+            return {"run": {"run_id": run_id, "project_id": project_id, "status": "RUNNING"}, "decision_request": None}
+        return await orchestration_engine.run(project_id, req.message)
+    except ModelUnavailableError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (DiligenceError, OrchestrationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/ai/projects/{project_id}/orchestration/{run_id}", response_model=OrchestrationRun)
+async def get_orchestration_run(project_id: str, run_id: str, context: RequestContext = Depends(request_context)):
+    try:
+        require_orchestration_workspace(project_id, context, "project:read")
+        return orchestration_engine.get_run(project_id, run_id).model_dump(mode="json")
+    except (DiligenceError, OrchestrationError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/v1/ai/projects/{project_id}/orchestration/{run_id}/resume")
+async def resume_orchestration_run(project_id: str, run_id: str, context: RequestContext = Depends(request_context)):
+    try:
+        require_orchestration_workspace(project_id, context, "orchestration:run")
+        if temporal_executor:
+            await temporal_executor.signal_decision(run_id)
+            return {"run_id": run_id, "status": "RESUMED"}
+        return await orchestration_engine.resume(project_id, run_id)
+    except (DiligenceError, OrchestrationError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/ai/projects/{project_id}/orchestration/{run_id}/events")
+async def stream_orchestration_events(project_id: str, run_id: str, context: RequestContext = Depends(request_context)):
+    require_orchestration_workspace(project_id, context, "project:read")
+    async def events():
+        sequence = 0
+        while True:
+            try:
+                run = orchestration_engine.get_run(project_id, run_id)
+            except OrchestrationError:
+                yield "event: error\ndata: {\"message\":\"Run not available yet\"}\n\n"
+                await __import__("asyncio").sleep(1)
+                continue
+            for item in run.events[sequence:]:
+                sequence = item["sequence"]
+                yield f"event: {item['type']}\ndata: {__import__('json').dumps(item)}\n\n"
+            if run.status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                break
+            await __import__("asyncio").sleep(1)
+    return StreamingResponse(events(), media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.get("/health")
 async def health_check():
     return {
@@ -430,6 +753,52 @@ async def health_check():
     }
 
 
+@app.get("/health/live")
+async def health_live():
+    return {"status": "live", "service": "mireye-platform"}
+
+
+@app.get("/health/ready")
+async def health_ready():
+    dependencies: dict[str, bool] = {}
+    try:
+        await asyncio.to_thread(_database_ready)
+        dependencies["database"] = True
+    except Exception:
+        dependencies["database"] = False
+    try:
+        await cache.ping()
+        dependencies["redis"] = True
+    except Exception:
+        dependencies["redis"] = False
+    if _settings.artifact_store_backend == "s3":
+        try:
+            await asyncio.to_thread(artifact_store.client.head_bucket, Bucket=artifact_store.bucket)
+            dependencies["artifact_store"] = True
+        except Exception:
+            dependencies["artifact_store"] = False
+    if _settings.workflow_backend == "temporal" and _settings.temporal_target:
+        dependencies["temporal"] = await _tcp_ready(_settings.temporal_target, 7233)
+    ready = all(dependencies.values())
+    return JSONResponse({"status": "ready" if ready else "unavailable", "dependencies": dependencies}, status_code=200 if ready else 503)
+
+
+def _database_ready() -> None:
+    with workspace_store._get_conn() as connection:
+        connection.execute("SELECT 1").fetchone()
+
+
+async def _tcp_ready(target: str, default_port: int) -> bool:
+    host, separator, port = target.rpartition(":")
+    try:
+        _reader, writer = await asyncio.wait_for(asyncio.open_connection(host if separator else target, int(port) if separator else default_port), timeout=1)
+        writer.close()
+        await writer.wait_closed()
+        return True
+    except (OSError, TimeoutError):
+        return False
+
+
 @app.get("/v1/usage")
 async def get_usage():
     return await mireye_client.usage()
@@ -437,7 +806,7 @@ async def get_usage():
 
 @app.get("/v1/meta/fields")
 async def get_meta_fields():
-    return await mireye_client.meta_fields()
+    return await cache.get_or_set("mireye:meta:fields:v1", 3600, mireye_client.meta_fields)
 
 
 @app.post("/v1/sandbox/site/resolve")

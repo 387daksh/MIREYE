@@ -11,6 +11,7 @@ from typing import Any, Protocol
 import httpx
 
 from app.config import OPENAI_API_KEY, SANDBOX_AGENT_MODEL, SANDBOX_AGENT_REASONING_EFFORT
+from app.infrastructure.observability import record_model_usage, span
 from app.sandbox import ConfirmationRequired, SiteSnapshotService, campus_component_object, scene_state_from_snapshot
 from app.sandbox_evaluator import SceneValidationError, build_oriented_footprint, evaluate_site
 from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_data_center_proposal
@@ -19,7 +20,7 @@ from app.sandbox_scenarios import ScenarioError, ScenarioService
 
 SYSTEM_INSTRUCTIONS = """You are the MIREYE Site Sandbox site-planning copilot. MIREYE/source evidence is authoritative for factual site data. OBSERVED data is factual, DERIVED data is deterministic, and PROPOSED campus objects are conceptual simulations. Begin every request with get_site_context using the provided snapshot ID. Use tools for all factual claims, proposal changes, and evaluations. PASS, FAIL, and UNRESOLVED only come from evaluate_scenario; never calculate or decide them yourself. Point-scoped flood, slope, and proximity results must never be described as parcel-wide or capacity/access proof. For an unqualified fit request, evaluate footprint_inside_parcel, footprint_area, and parcel_coverage only. Do not request minimum_setback without a numeric minimum_m. When proposing a campus, select only the conceptual element roles useful to the stated project; deterministic tools own their geometry. When the user asks for a second, alternative, or another layout and an active scenario exists, call branch_scenario, make a validated geometry change with transform_object or optimize_layout, and evaluate it; never remove or overwrite the existing layout, and never describe an identical branch as an alternative. The semantic campus components are conceptual massing inside the deterministically evaluated planning envelope, not engineering designs. Never invent values, parcel facts, geometry, or engineering conclusions. Do not claim engineering-grade analysis. If evidence cannot prove a request, state UNRESOLVED. You may inspect MIREYE freshness and request a quote. A MIREYE refresh can run only after the application has supplied explicit confirmation; you cannot create confirmation yourself. In the final user-facing response, use plain site-planning language and do not mention tool names, internal object IDs, evidence IDs, snapshot IDs, schema versions, or API implementation details."""
 
-DILIGENCE_SYSTEM_INSTRUCTIONS = """You are the single MIREYE site-diligence orchestrator. Work only with candidates supplied in the current project; statewide inverse parcel discovery is unavailable and the synthetic screen endpoint is prohibited. Begin by reading the persisted requirement context and discovery capabilities. The requirement context includes the original request, current ConstraintSpec, machine-only capability schemas, evidence limitations, completed decisions, assumptions, candidate state, workflow step, and spend state. Decide whether to AUTO_CONTINUE, ASSUME_AND_CONTINUE, or ASK_USER. Ask only for the minimum information that materially blocks safe progress. For ASK_USER, generate the question, context, answer mode, useful options or custom input schema, recommendation, and explanation from this project's actual context; there is no predefined conversation tree. Every option and assumption must carry a typed constraint value allowed by the supplied capability schema. HARD_BLOCK is application-owned and cannot be created by you. Stop when a DecisionRequest is created and wait for its resume token. Use typed tools for candidate resolution, MIREYE field planning, quoting, enrichment, evaluation, ranking, evidence, and freshness. You cannot create confirmation: identity, enrichment cost, refresh, and MIREYE site questions require application-owned decisions. Never invent candidate facts, numerical scores, geometry, grid capacity, legal access, parcel-wide slope, parcel-wide flood safety, zoning meaning, or evaluator logic. Deterministic tools alone validate constraints and produce PASS, FAIL, and UNRESOLVED. Call a candidate a winner only when the deterministic decision status is DECISION_READY; ties and unresolved results are NO_DECISION_YET."""
+DILIGENCE_SYSTEM_INSTRUCTIONS = """You are the single MIREYE site-diligence orchestrator. Work only with candidates supplied in the current project; statewide inverse parcel discovery is unavailable and the synthetic screen endpoint is prohibited. Begin by reading the persisted requirement context and discovery capabilities. The requirement context includes the original request, current ConstraintSpec, machine-only capability schemas, evidence limitations, completed decisions, assumptions, candidate state, workflow step, spend state, deterministic ProjectIntelligence, PowerReadiness, EntitlementState, and recent ProjectChanges. Treat semantic strength literally: DIRECTLY_VERIFIED is a sourced fact, SOURCE_BACKED_SIGNAL is context only, DERIVED is a deterministic calculation, INSUFFICIENT_EVIDENCE cannot support a claim, and UNSUPPORTED_SEMANTICS cannot be upgraded by explanation. Decide whether to AUTO_CONTINUE, ASSUME_AND_CONTINUE, or ASK_USER. Ask only for the minimum information that materially blocks safe progress. For ASK_USER, generate the question, context, answer mode, useful options or custom input schema, recommendation, and explanation from this project's actual context; there is no predefined conversation tree. Every option and assumption must carry a typed constraint value allowed by the supplied capability schema. HARD_BLOCK is application-owned and cannot be created by you. Stop when a DecisionRequest is created and wait for its resume token. Use typed tools for candidate resolution, MIREYE field planning, quoting, enrichment, evaluation, ranking, evidence, freshness, project intelligence, power readiness, entitlement, next actions, RFI drafts, and change summaries. Explain unresolved requirements only from structured state. Describe a change or its materiality only from structured ProjectChange records. Recommend only deterministically ranked actions. RFI wording may be generated dynamically, but its required evidence, site, project load, and recipient category come from the validated action; drafts require human approval and are never sent automatically. You cannot create confirmation: identity, enrichment cost, refresh, and MIREYE site questions require application-owned decisions. Never invent candidate facts, changes, costs, timelines, numerical scores, geometry, grid capacity, interconnection status, permit status, legal conclusions, legal access, parcel-wide slope, parcel-wide flood safety, zoning meaning, or evaluator logic. Proximity, voltage, queue totals, and mapped equipment never prove deliverable MW. Raw zoning never proves a permitted use. Deterministic tools alone validate constraints and produce PASS, FAIL, and UNRESOLVED. Call a candidate a winner only when the deterministic decision status is DECISION_READY; ties and unresolved results are NO_DECISION_YET. In final user-facing responses, use plain project language and do not expose snapshot IDs, internal constraint/action/evidence IDs, schema versions, or tool names."""
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -135,6 +136,15 @@ DILIGENCE_TOOL_DEFINITIONS = [
     _tool("evaluate_candidates", "Return deterministic candidate evaluations created from immutable SiteSnapshots.", {"project_id": {"type": "string"}}, ["project_id"]),
     _tool("rank_candidates", "Order candidates deterministically by failure, uncertainty, and pass counts; never invent a suitability score.", {"project_id": {"type": "string"}}, ["project_id"]),
     _tool("compare_candidates", "Compare deterministic outcomes, values, units, and evidence IDs for selected candidates.", {"project_id": {"type": "string"}, "candidate_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2}}, ["project_id", "candidate_ids"]),
+    _tool("get_project_intelligence", "Read deterministic readiness, evidence coverage, blockers, and evidence dependencies.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("get_project_changes", "Read deterministic evidence changes and their propagated impact; never infer changes outside this result.", {"project_id": {"type": "string"}, "since": {"type": ["number", "null"]}}, ["project_id", "since"]),
+    _tool("get_power_readiness", "Read deterministic power context, deliverability blockers, provenance, and actions for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
+    _tool("get_entitlement_state", "Read jurisdiction, zoning, approval-path evidence, legal-review flags, and actions for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
+    _tool("refresh_authoritative_sources", "Retrieve only the application's allow-listed public power and jurisdiction sources for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
+    _tool("get_next_actions", "Return the deterministic next-action ranking and its score provenance.", {"project_id": {"type": "string"}}, ["project_id"]),
+    _tool("draft_project_rfi", "Store a dynamically worded RFI draft for one validated next action. The application owns required evidence and requires human approval before sending.", {
+        "project_id": {"type": "string"}, "action_id": {"type": "string"}, "generated_request": {"type": "string"},
+    }, ["project_id", "action_id", "generated_request"]),
     _tool("check_evidence_freshness", "Check field-level freshness for enriched project candidates without fetching.", {"project_id": {"type": "string"}}, ["project_id"]),
     _tool("quote_mireye_refresh", "Quote the minimum stale fields for one enriched candidate without fetching.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}}, ["project_id", "candidate_id"]),
     _tool("confirm_and_refresh_evidence", "Execute a candidate refresh only for an application-confirmed spend plan.", {"project_id": {"type": "string"}, "candidate_id": {"type": "string"}, "spend_plan_id": {"type": "string"}}, ["project_id", "candidate_id", "spend_plan_id"]),
@@ -145,6 +155,37 @@ DILIGENCE_TOOL_DEFINITIONS = [
         "requested_layers": {"type": "array", "items": {"type": "string", "enum": ["terrain", "roads", "buildings", "water", "land_cover", "transmission"]}},
     }, ["project_id", "candidate_id", "requested_layers"]),
 ]
+
+
+def _validated_diligence_message(message: str, project: dict) -> str:
+    """Reject explicit outcome claims that do not match deterministic coverage."""
+    claims = re.findall(r"([A-Za-z][A-Za-z0-9 _/-]{1,60}?)\s*(?::|\bis\b)\s*(PASS|FAIL|UNRESOLVED)\b", message, re.IGNORECASE)
+    power_claim = any(re.search(pattern, message, re.IGNORECASE) for pattern in (
+        r"\bdeliverability\s+(?:is\s+)?(?:confirmed|verified|available)\b",
+        r"\b\d+(?:\.\d+)?\s*mw\s+(?:is\s+)?(?:available|deliverable|committed)\b",
+    ))
+    legal_claim = bool(re.search(r"\bdata[- ]center\s+(?:use\s+)?is\s+(?:legally\s+)?(?:permitted|approved)\b", message, re.IGNORECASE))
+    power = (project.get("project_intelligence") or {}).get("power_readiness") or {}
+    entitlement = (project.get("project_intelligence") or {}).get("entitlement") or {}
+    if power_claim and power.get("readiness_state") != "VERIFIED" or legal_claim and entitlement.get("readiness_state") != "VERIFIED":
+        return "I cannot support that power or entitlement conclusion from the current structured evidence. Review the unresolved readiness items and their sources."
+    if re.search(r"\b(changed|became stale|requires? rebase|invalidated)\b", message, re.IGNORECASE) and not project.get("recent_changes"):
+        return "I cannot support a change claim because no structured ProjectChange record exists for this project."
+    if not claims:
+        return message
+    coverage = (project.get("project_intelligence") or {}).get("evidence_coverage", [])
+    for subject, outcome in claims:
+        normalized = re.sub(r"[^a-z0-9]+", " ", subject.casefold()).strip()
+        matching = [
+            item for item in coverage
+            if normalized in {
+                re.sub(r"[^a-z0-9]+", " ", str(item.get("title", "")).casefold()).strip(),
+                re.sub(r"[^a-z0-9]+", " ", str(item.get("requirement_id", "")).casefold()).strip(),
+            }
+        ]
+        if len(matching) != 1 or matching[0].get("status") != outcome.upper():
+            return "I cannot support that outcome claim from the deterministic project state. Review the readiness and evidence coverage before making a decision."
+    return message
 
 
 class ToolValidationError(ValueError):
@@ -179,16 +220,18 @@ class OpenAIResponsesModel:
         if not self.api_key:
             raise ModelUnavailableError("Sandbox chat requires OPENAI_API_KEY configuration.")
         payload = {"model": self.model, "reasoning": {"effort": self.reasoning_effort}, "instructions": instructions, "input": input_items, "tools": tools, "tool_choice": "auto", "parallel_tool_calls": False, "store": False}
-        async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
-            try:
-                response = await client.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {self.api_key}"}, json=payload)
-                response.raise_for_status()
-            except httpx.HTTPStatusError as exc:
-                detail = response.json().get("error", {}).get("message", "OpenAI rejected the sandbox chat request.")
-                raise ModelUnavailableError(detail) from exc
-            except httpx.RequestError as exc:
-                raise ModelUnavailableError("OpenAI sandbox chat is temporarily unavailable.") from exc
+        with span("model.response", **{"gen_ai.system": "openai", "gen_ai.request.model": self.model}):
+            async with httpx.AsyncClient(timeout=httpx.Timeout(120, connect=15)) as client:
+                try:
+                    response = await client.post("https://api.openai.com/v1/responses", headers={"Authorization": f"Bearer {self.api_key}"}, json=payload)
+                    response.raise_for_status()
+                except httpx.HTTPStatusError as exc:
+                    detail = response.json().get("error", {}).get("message", "OpenAI rejected the sandbox chat request.")
+                    raise ModelUnavailableError(detail) from exc
+                except httpx.RequestError as exc:
+                    raise ModelUnavailableError("OpenAI sandbox chat is temporarily unavailable.") from exc
         body = response.json()
+        record_model_usage(self.model, body.get("usage") or {})
         calls = []
         for item in body.get("output", []):
             if item.get("type") == "function_call":
@@ -243,7 +286,8 @@ class SandboxToolExecutor:
         }
         if name not in handlers:
             raise ToolValidationError(f"Tool is not available: {name}.")
-        return handlers[name](arguments)
+        with span("agent.tool", **{"tool.name": name}):
+            return handlers[name](arguments)
 
     @staticmethod
     def _only(arguments: dict, allowed: set[str], required: set[str]) -> None:
@@ -300,7 +344,7 @@ class SandboxToolExecutor:
         return {
             "parcel_identity": copy.deepcopy(self.snapshot["parcel_identity"]),
             "observed_geometry": {"type": self.snapshot["geometry"].get("type"), "source": self.snapshot["parcel_identity"].get("parcel_data_source"), "origin": "OBSERVED"},
-            "evidence_summary": {key: {"status": value.get("status"), "scope": value.get("scope"), "source": value.get("source"), "expires_at": value.get("expires_at")} for key, value in self.snapshot.get("evidence", {}).items()},
+            "evidence_summary": {key: {"status": value.get("status"), "scope": value.get("scope"), "source": value.get("source"), "semantic_strength": value.get("semantic_strength"), "claim_limits": value.get("claim_limits", []), "expires_at": value.get("expires_at")} for key, value in self.snapshot.get("evidence", {}).items()},
             "available_constraints": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in"],
             "unresolved_constraints": ["parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "sufficient_grid_capacity"],
             "scene_state": copy.deepcopy(self.session.scene_state),
@@ -653,7 +697,8 @@ class SandboxAgent:
             project = self.diligence.get(project_id)
         else:
             final_message = "Tool-call limit reached; no further action was taken."
-        return {"message": final_message, "session_id": session_id, "project": self.diligence.get(project_id), "tool_trace": trace}
+        project = self.diligence.get(project_id)
+        return {"message": _validated_diligence_message(final_message, project), "session_id": session_id, "project": project, "tool_trace": trace}
 
     async def interpret_project_decision_answer(
         self, project_id: str, decision_id: str, *, resume_token: str, text: str,
@@ -724,7 +769,7 @@ class SandboxAgent:
             )
         if name == "plan_mireye_fields":
             SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
-            return self.diligence.plan_fields(project_id)
+            return await self.diligence.plan_project_evidence(project_id)
         if name == "quote_mireye_enrichment":
             SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
             return await self.diligence.resolve_and_quote(
@@ -742,6 +787,27 @@ class SandboxAgent:
         if name == "compare_candidates":
             SandboxToolExecutor._only(arguments, {"project_id", "candidate_ids"}, {"project_id", "candidate_ids"})
             return self.diligence.compare_candidates(project_id, arguments["candidate_ids"])
+        if name == "get_project_intelligence":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return self.diligence.evaluate_evidence_coverage(project_id)
+        if name == "get_project_changes":
+            SandboxToolExecutor._only(arguments, {"project_id", "since"}, {"project_id", "since"})
+            return self.diligence.changes(project_id, since=arguments["since"])
+        if name == "get_power_readiness":
+            SandboxToolExecutor._only(arguments, {"project_id", "site_id"}, {"project_id", "site_id"})
+            return self.diligence.power_readiness(project_id, arguments["site_id"])
+        if name == "get_entitlement_state":
+            SandboxToolExecutor._only(arguments, {"project_id", "site_id"}, {"project_id", "site_id"})
+            return self.diligence.entitlement_state(project_id, arguments["site_id"])
+        if name == "refresh_authoritative_sources":
+            SandboxToolExecutor._only(arguments, {"project_id", "site_id"}, {"project_id", "site_id"})
+            return await self.diligence.refresh_authoritative_sources(project_id, arguments["site_id"])
+        if name == "get_next_actions":
+            SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
+            return self.diligence.next_actions(project_id)
+        if name == "draft_project_rfi":
+            SandboxToolExecutor._only(arguments, {"project_id", "action_id", "generated_request"}, {"project_id", "action_id", "generated_request"})
+            return self.diligence.create_rfi_draft(project_id, arguments["action_id"], arguments["generated_request"])
         if name == "check_evidence_freshness":
             SandboxToolExecutor._only(arguments, {"project_id"}, {"project_id"})
             return self.diligence.check_now(project_id)

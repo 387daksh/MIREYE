@@ -490,7 +490,8 @@
       const source = document.createElement("span");
       const freshness = document.createElement("span");
       name.textContent = constraintName(record.field);
-      source.textContent = `${record.source || "MIREYE source"} · ${record.confidence || "confidence not stated"}`;
+      const strength = String(record.semantic_strength || "SOURCE_BACKED_SIGNAL").replaceAll("_", " ").toLowerCase();
+      source.textContent = `${strength} · ${record.source || "MIREYE source"} · ${record.confidence || "confidence not stated"}`;
       if (record.source_url) {
         const link = document.createElement("a");
         link.href = record.source_url;
@@ -542,6 +543,22 @@
     const state = document.getElementById("mireyeFreshnessState");
     const cached = Object.values(snapshotData.evidence || {}).filter((record) => record.carried_from_snapshot_id).length;
     renderFactsList(document.getElementById("mireyeFreshnessFacts"), [["Verified", String(verified.length)], ["Unresolved", String(unresolved.length)], ["Cached", String(cached)]]);
+    const usable = Object.values(snapshotData.evidence || {}).filter((record) => record && record.status === "ok" && record.value !== null && record.value !== undefined);
+    const semanticRows = [
+      ["Verified", usable.filter((record) => record.semantic_strength === "DIRECTLY_VERIFIED").length],
+      ["Needs interpretation", usable.filter((record) => ["SOURCE_BACKED_SIGNAL", "DERIVED"].includes(record.semantic_strength)).length],
+      ["Missing / unresolved", unresolved.length],
+    ].map(([label, count]) => {
+      const row = document.createElement("div");
+      row.className = "evidence-strength-row";
+      const title = document.createElement("strong");
+      const value = document.createElement("span");
+      title.textContent = label;
+      value.textContent = String(count);
+      row.append(title, value);
+      return row;
+    });
+    document.getElementById("mireyeEvidenceStrength").replaceChildren(...semanticRows);
     state.className = `status-dot ${payload.refresh_required ? "unresolved" : "pass"}`;
     document.getElementById("intelligenceHeadline").textContent = payload.refresh_required ? "Update recommended" : `Refreshed ${relativeTime(snapshotData.observed_at)}`;
     document.getElementById("mireyeRefreshQuote").disabled = !payload.refresh_required;
@@ -656,11 +673,11 @@
   }
 
   async function ensureWorld() {
-    const requiredLayers = ["terrain", "roads"];
+    const requiredLayers = ["terrain", "roads", "buildings", "water", "land_cover", "transmission"];
     if (sceneState.world_snapshot_id) {
       const existing = await loadWorld(sceneState.world_snapshot_id);
-      const available = new Set(existing.layers.filter((layer) => layer.availability === "AVAILABLE").map((layer) => layer.layer));
-      if (requiredLayers.every((layer) => available.has(layer))) return existing;
+      const represented = new Set(existing.layers.map((layer) => layer.layer));
+      if (requiredLayers.every((layer) => represented.has(layer))) return existing;
     }
     document.getElementById("groundStateChip").textContent = "Loading real physical context...";
     const response = await fetch("/v1/sandbox/world-snapshots", {
@@ -836,16 +853,9 @@
       container: "sandboxMap",
       style: {
         version: 8,
-        sources: {
-          "osm-basemap": {
-            type: "raster", tileSize: 256, maxzoom: 19,
-            tiles: ["https://tile.openstreetmap.org/{z}/{x}/{y}.png"],
-            attribution: "&copy; OpenStreetMap contributors",
-          },
-        },
+        sources: {},
         layers: [
           { id: "map-background", type: "background", paint: { "background-color": "#d9dfda" } },
-          { id: "osm-basemap", type: "raster", source: "osm-basemap", paint: { "raster-opacity": 0.82, "raster-saturation": -0.42, "raster-contrast": 0.08 } },
         ],
       },
       center: initialCenter,

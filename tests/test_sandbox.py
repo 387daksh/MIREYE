@@ -349,9 +349,10 @@ def test_sandbox_ui_uses_grounded_world_context_and_decision_oriented_campus():
     assert "world-water-fill" in script
     assert "world-land-cover-fill" in script
     assert 'id="buildingsToggle"' in markup
-    assert "tile.openstreetmap.org" in script
+    assert "tile.openstreetmap.org" not in script
+    assert "sources: {}" in script
     assert "ensureWorld" in script
-    assert 'const requiredLayers = ["terrain", "roads"]' in script
+    assert 'const requiredLayers = ["terrain", "roads", "buildings", "water", "land_cover", "transmission"]' in script
     assert "requiredLayers.every" in script
     assert "componentGeometry" in script
     assert "sandbox-proposed-surfaces" in script

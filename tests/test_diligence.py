@@ -7,9 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app import main
-from app.diligence import CONSTRAINT_CAPABILITIES, DiligenceError, DiligenceService, UserSuppliedCandidateProvider, compile_project_request
+from app.diligence import CONSTRAINT_CAPABILITIES, CONSTRAINT_FIELDS, DiligenceError, DiligenceService, UserSuppliedCandidateProvider, compile_project_request
 from app.mireye_client import MireyeClient
-from app.sandbox import ConfirmationRequired, SITE_SNAPSHOT_FIELDS, SITE_SNAPSHOT_FIELD_SCOPES, SiteSnapshotService
+from app.sandbox import DATA_CENTER_CONTEXT_FIELDS, ConfirmationRequired, SITE_SNAPSHOT_FIELDS, SITE_SNAPSHOT_FIELD_SCOPES, SiteSnapshotService
 from app.sandbox_agent import DILIGENCE_TOOL_DEFINITIONS, TOOL_DEFINITIONS, ModelReply, SandboxAgent
 from app.workspace.store import WorkspaceStore
 
@@ -43,11 +43,13 @@ class FakeMireye:
         return {"disposition": "exact_match", "candidates": [{"lat": latitude, "lng": -97.0, "address": input}]}
 
     async def meta_fields(self):
+        fields = set(SITE_SNAPSHOT_FIELDS)
+        fields.update(name for names in CONSTRAINT_FIELDS.values() for name in names)
         return {
             "version": "catalog-diligence-v1",
             "fields": [
                 {"name": name, "source": "MIREYE_TEST", "ttl_seconds": 60, "scope": SITE_SNAPSHOT_FIELD_SCOPES.get(name)}
-                for name in SITE_SNAPSHOT_FIELDS
+                for name in sorted(fields)
             ],
         }
 
@@ -103,6 +105,13 @@ def create_project(service, candidates=None):
         message="Compare sites for a 100 MW data center, 20-50 acres, resolution point outside flood, within 2 km of transmission and within 1 km of road, with sufficient grid capacity.",
         candidates=candidates or ["First Site", "Second Site"],
     )
+
+
+def approve_enrichment(service, quoted):
+    decision = quoted["active_decision"]
+    return run(service.answer_decision(
+        quoted["project_id"], decision["decision_id"], resume_token=decision["resume_token"], option_id="continue",
+    ))
 
 
 def test_candidate_provider_ingests_typed_inputs_and_pages_without_discovery():
@@ -183,7 +192,7 @@ def test_field_plan_is_constraint_driven_and_does_not_fetch_full_catalog(diligen
 
     assert {"parcel_id", "parcel_boundary_geojson", "parcel_area_m2", "within_floodplain_polygon", "nearest_transmission_line_distance_m", "nearest_major_road_distance_m"} <= set(plan["fields"])
     assert "fiber_provider_count" not in plan["fields"]
-    assert len(plan["fields"]) < len(SITE_SNAPSHOT_FIELDS)
+    assert len(plan["fields"]) < len(DATA_CENTER_CONTEXT_FIELDS)
     assert client.lookup_calls == client.quote_calls == client.batch_calls == []
 
 
@@ -196,8 +205,10 @@ def test_resolution_and_enrichment_have_separate_approval_gates(diligence):
     assert client.lookup_calls == []
 
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
-    assert quoted["status"] == "AWAITING_ENRICHMENT_APPROVAL"
+    assert quoted["status"] == "NEEDS_USER_DECISION"
     assert quoted["spend_plan"]["expected_credits"] == 20
+    assert client.quote_calls[0]["fields"] == service.plan_fields(project["project_id"])["fields"]
+    assert client.quote_calls[0]["preset"] is None
     assert client.batch_calls == []
 
 
@@ -222,9 +233,9 @@ def test_batch_enrichment_preserves_partial_failure_and_ranks_deterministically(
     project = create_project(service, ["First Site", "Second Site", "Broken Site"])
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
 
-    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    completed = approve_enrichment(service, quoted)
 
-    assert completed["status"] == "EVALUATED"
+    assert completed["status"] == "NO_DECISION_YET"
     assert len(client.batch_calls) == 2
     states = {item["raw_input"]: item["reconciliation_status"] for item in completed["candidates"]}
     assert states == {"First Site": "ENRICHED", "Second Site": "ENRICHED", "Broken Site": "ENRICHMENT_FAILED"}
@@ -239,13 +250,16 @@ def test_failed_batch_candidate_requotes_without_repeating_lookup(diligence):
     service, client, _store = diligence
     project = create_project(service, ["Broken Site"])
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
-    failed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    failed = approve_enrichment(service, quoted)
     lookup_count = len(client.lookup_calls)
 
-    retried = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+    retried = run(service.resolve_and_quote(
+        project["project_id"], confirmed_resolution=True,
+        retry_reason="Retry after the recorded batch enrichment failure.",
+    ))
 
     assert failed["candidates"][0]["reconciliation_status"] == "ENRICHMENT_FAILED"
-    assert retried["status"] == "AWAITING_ENRICHMENT_APPROVAL"
+    assert retried["status"] == "NEEDS_USER_DECISION"
     assert len(client.lookup_calls) == lookup_count
     assert retried["candidates"][0]["reconciliation_status"] == "RESOLVED"
 
@@ -254,7 +268,7 @@ def test_candidate_handoff_watch_and_restart_safe_persistence(diligence):
     service, _client, store = diligence
     project = create_project(service, ["First Site"])
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
-    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    completed = approve_enrichment(service, quoted)
     candidate_id = completed["candidates"][0]["candidate_id"]
 
     handoff = service.open_candidate(project["project_id"], candidate_id)
@@ -264,7 +278,7 @@ def test_candidate_handoff_watch_and_restart_safe_persistence(diligence):
 
     assert handoff["site_id"] == completed["candidates"][0]["site_id"]
     assert handoff["sandbox_url"].startswith("/sandbox/site_")
-    assert check["candidate_states"][0]["status"] == "CURRENT"
+    assert check["candidate_states"][0]["status"] == "STALE_EVIDENCE"
     assert restarted["watch"]["enabled"] is True
 
 
@@ -272,7 +286,7 @@ def test_candidate_refresh_creates_t2_and_re_evaluates_project(monkeypatch, dili
     service, client, store = diligence
     project = create_project(service, ["First Site"])
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
-    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    completed = approve_enrichment(service, quoted)
     candidate = completed["candidates"][0]
     original_snapshot = store.get_site_snapshot(candidate["snapshot_id"])
     future = original_snapshot["observed_at"] + 61
@@ -316,21 +330,20 @@ def test_single_orchestrator_runs_mocked_project_end_to_end(diligence):
     agent = SandboxAgent(model=planning_model, diligence=service)
 
     planned = run(agent.chat_project(project_id, "session-1", "Plan this shortlist.", confirmed_resolution_project_id=project_id))
-    spend_plan_id = planned["project"]["spend_plan"]["spend_plan_id"]
-    assert planned["project"]["status"] == "AWAITING_ENRICHMENT_APPROVAL"
+    assert planned["project"]["status"] == "NEEDS_USER_DECISION"
     assert client.batch_calls == []
+    approve_enrichment(service, planned["project"])
 
     execution_model = ScriptedModel([
-        tool("confirm_and_fetch_enrichment", {"project_id": project_id, "spend_plan_id": spend_plan_id}, "fetch"),
         tool("rank_candidates", {"project_id": project_id}, "rank"),
         ModelReply(message="The shortlist is ranked from deterministic evidence; grid capacity remains unresolved.", tool_calls=[], response_items=[]),
     ])
     agent.model = execution_model
-    completed = run(agent.chat_project(project_id, "session-1", "Proceed with the approved enrichment.", confirmed_enrichment_plan_id=spend_plan_id))
+    completed = run(agent.chat_project(project_id, "session-1", "Rank the approved enrichment."))
 
-    assert completed["project"]["status"] == "EVALUATED"
+    assert completed["project"]["status"] == "NO_DECISION_YET"
     assert [item["tool"] for item in planned["tool_trace"]] == ["compile_project_request", "get_discovery_capabilities", "quote_mireye_enrichment"]
-    assert [item["tool"] for item in completed["tool_trace"]] == ["confirm_and_fetch_enrichment", "rank_candidates"]
+    assert [item["tool"] for item in completed["tool_trace"]] == ["rank_candidates"]
     assert all(definition["name"] not in {"fetch", "fetch_batch", "lookup"} for definition in DILIGENCE_TOOL_DEFINITIONS)
 
 
@@ -362,10 +375,13 @@ def test_diligence_http_flow_uses_service_and_preserves_approval(monkeypatch, di
 
     quoted = http.post(f"/v1/diligence/projects/{project_id}/plan", json={"confirmed_resolution": True})
     assert quoted.status_code == 200
-    plan_id = quoted.json()["spend_plan"]["spend_plan_id"]
-    completed = http.post(f"/v1/diligence/projects/{project_id}/enrich", json={"spend_plan_id": plan_id, "confirmed": True})
+    decision = quoted.json()["active_decision"]
+    completed = http.post(
+        f"/v1/diligence/projects/{project_id}/decisions/{decision['decision_id']}/answer",
+        json={"resume_token": decision["resume_token"], "option_id": "continue"},
+    )
     assert completed.status_code == 200
-    assert completed.json()["status"] == "EVALUATED"
+    assert completed.json()["spend_plan"]["status"] == "COMPLETED"
     assert http.get(f"/v1/diligence/projects/{project_id}/candidates").json()["total"] == 1
 
 
@@ -430,13 +446,13 @@ def test_material_canonical_address_mismatch_requires_confirmation(diligence):
     service, _client, _store = diligence
     project = service.create_project(workspace_id="workspace-address", message="Compare 20-50 acre sites.", candidates=["100 Main Street, Austin, TX"])
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
-    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    completed = approve_enrichment(service, quoted)
     candidate = completed["candidates"][0]
 
     assert candidate["reconciliation_status"] == "ADDRESS_CONFIRMATION_REQUIRED"
-    assert candidate["address_reconciliation"] == {
-        "submitted_address": "100 Main Street, Austin, TX", "canonical_address": "32 Test Road", "status": "CONFIRMATION_REQUIRED",
-    }
+    assert candidate["address_reconciliation"]["submitted_address"] == "100 Main Street, Austin, TX"
+    assert candidate["address_reconciliation"]["canonical_address"] == "32 Test Road"
+    assert candidate["address_reconciliation"]["status"] == "CONFIRMATION_REQUIRED"
     with pytest.raises(DiligenceError, match="address mismatch confirmed"):
         service.open_candidate(project["project_id"], candidate["candidate_id"])
 
@@ -460,7 +476,7 @@ def test_failed_batch_never_escalates_above_configured_size(diligence):
 
     client.fetch_batch = fail_batch
     quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
-    completed = run(service.confirm_and_fetch(project["project_id"], quoted["spend_plan"]["spend_plan_id"], confirmed=True))
+    completed = approve_enrichment(service, quoted)
 
     assert quoted["spend_plan"]["batch_strategy"] == {"max_batch_size": 2, "batch_count": 2}
     assert batch_sizes == [2, 1]
@@ -562,6 +578,94 @@ def test_dynamic_decision_invalid_generated_schema_is_rejected(diligence):
         service.agent_decision(project["project_id"], mode="ASK_USER", decision_request=invalid)
 
     assert service.get(project["project_id"])["active_decision"] is None
+
+
+def test_unknown_model_decision_target_is_never_persisted(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-invalid-target",
+        message="Screen one site for a 100 MW data center.",
+        candidates=["First Site"],
+    )
+    invalid = number_decision(
+        "What unsupported capability should be used?",
+        target="model_created_constraint",
+        field="invented_value",
+    )
+
+    with pytest.raises(DiligenceError, match="unavailable constraint capability"):
+        service.agent_decision(project["project_id"], mode="ASK_USER", decision_request=invalid)
+
+    assert service.get(project["project_id"])["active_decision"] is None
+
+
+def test_grid_evidence_gap_becomes_application_owned_user_action(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-grid-gap",
+        message="Screen one site for a 100 MW data center within 2 km of transmission.",
+        candidates=["First Site"],
+    )
+    proposal = choice_decision("How should I prove 100 MW deliverability?")
+    proposal["constraint_targets"] = ["sufficient_grid_capacity"]
+    proposal["options"] = [{
+        "id": "invented", "label": "Invented model choice", "description": "Must not become canonical.",
+        "value": requirement_value("sufficient_grid_capacity"), "consequence": "No application authority.",
+    }]
+    proposal["recommended_option_id"] = "invented"
+
+    result = service.agent_decision(project["project_id"], mode="ASK_USER", decision_request=proposal)
+    decision = result["decision_request"]
+
+    assert decision["originating_step"] == "project_intelligence"
+    assert {item["id"] for item in decision["options"]} == {"authorize_next_action", "keep_unresolved"}
+    assert service.get(project["project_id"])["active_decision"]["resume_action"]["type"] == "project_action"
+
+
+def test_mixed_unknown_decision_target_is_removed_before_canonical_action_is_persisted(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-grid-mixed-target",
+        message="Screen one site for a 100 MW data center.",
+        candidates=["First Site"],
+    )
+    proposal = choice_decision("How should I prove 100 MW deliverability?")
+    proposal["constraint_targets"] = ["sufficient_grid_capacity", "model_created_constraint"]
+
+    decision = service.agent_decision(
+        project["project_id"], mode="ASK_USER", decision_request=proposal,
+    )["decision_request"]
+
+    assert decision["constraint_targets"] == ["sufficient_grid_capacity"]
+    assert "model_created_constraint" not in str(service.get(project["project_id"])["active_decision"])
+
+
+def test_metered_operation_identity_reuses_success_and_bounds_retry(diligence):
+    service, _client, _store = diligence
+    project = service.create_project(
+        workspace_id="workspace-metered-guard",
+        message="Compare sites within 2 km of transmission.",
+        candidates=["First Site"],
+    )
+    stored = service.get(project["project_id"])
+    request = {"candidate_id": stored["candidates"][0]["candidate_id"], "value": "First Site"}
+    first = service._begin_metered_operation(stored, "MIREYE_RESOLVE", request, confirmed=True, retry_reason=None)
+    first.update(status="SUCCEEDED", result={"reconciliation_status": "RESOLVED"})
+    assert service._begin_metered_operation(stored, "MIREYE_RESOLVE", request, confirmed=True, retry_reason=None) is first
+
+    failed_request = {"candidate_id": "candidate_failed", "value": "Failed Site"}
+    failed = service._begin_metered_operation(stored, "MIREYE_RESOLVE", failed_request, confirmed=True, retry_reason=None)
+    failed["status"] = "FAILED"
+    with pytest.raises(DiligenceError, match="explicit reason"):
+        service._begin_metered_operation(stored, "MIREYE_RESOLVE", failed_request, confirmed=True, retry_reason=None)
+    retried = service._begin_metered_operation(
+        stored, "MIREYE_RESOLVE", failed_request, confirmed=True, retry_reason="Provider timeout recorded for this task.",
+    )
+    retried["status"] = "FAILED"
+    with pytest.raises(DiligenceError, match="retry limit"):
+        service._begin_metered_operation(
+            stored, "MIREYE_RESOLVE", failed_request, confirmed=True, retry_reason="Second provider timeout was recorded.",
+        )
 
 
 def test_dynamic_decision_resumes_same_project(diligence):
@@ -769,6 +873,9 @@ def test_candidate_resolution_ux_canonical_mismatch_details_and_reject(diligence
     ))
     assert rejected["status"] != "CANCELLED"
     assert rejected["candidate_resolution"]["items"][0]["status"] == "UNRESOLVED"
+    persisted = service.get(project["project_id"])
+    assert persisted["active_decision"] is None
+    assert persisted["decision_history"][-1]["status"] == "ANSWERED"
 
 
 def test_candidate_resolution_ux_frontend_is_specific_and_actionable():
@@ -781,3 +888,180 @@ def test_candidate_resolution_ux_frontend_is_specific_and_actionable():
     assert "data-option-index" in script
     assert "Submitted address" in script and "MIREYE canonical address" in script
     assert "Candidate resolution needs attention" not in script
+
+
+def _phase10_enrich(service, message, workspace_id="workspace-phase10"):
+    project = service.create_project(workspace_id=workspace_id, message=message, candidates=["First Site"])
+    quoted = run(service.resolve_and_quote(project["project_id"], confirmed_resolution=True))
+    decision = quoted["active_decision"]
+    return run(service.answer_decision(
+        project["project_id"], decision["decision_id"], resume_token=decision["resume_token"], option_id="continue",
+    ))
+
+
+def _phase10_blocked_project(service, workspace_id="workspace-phase10-blocked"):
+    return _phase10_enrich(
+        service,
+        "Compare this site for a 100 MW data center, 20-50 acres, within 2 km of transmission, "
+        "within 1 km of road, with sufficient grid capacity, water capacity, and fiber diversity.",
+        workspace_id,
+    )
+
+
+def test_phase10_complete_evidence_coverage(diligence):
+    service, _client, _store = diligence
+    project = _phase10_enrich(
+        service,
+        "Compare this site, 20-50 acres, resolution point outside flood, within 2 km of transmission, "
+        "within 1 km of road, raw zoning codes I-2 or M-1.",
+        "workspace-phase10-complete",
+    )
+    coverage = project["project_intelligence"]["evidence_coverage"]
+
+    assert coverage
+    assert all(item["coverage"] == "COMPLETE" and item["decision_provable"] for item in coverage)
+    assert project["project_intelligence"]["project_readiness_state"] == "READY_FOR_CURRENT_DECISION"
+
+
+def test_phase10_partial_and_missing_critical_evidence_create_gap(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service)
+    intelligence = project["project_intelligence"]
+    grid = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "sufficient_grid_capacity")
+    gap = next(item for item in intelligence["unresolved_issues"] if item["requirement_id"] == "sufficient_grid_capacity")
+
+    assert grid["coverage"] == "PARTIAL"
+    assert grid["status"] == "UNRESOLVED"
+    assert "utility_confirmed_deliverable_capacity_mw" in grid["missing_evidence"]
+    assert gap["blocking"] is True and gap["impact"] == "CRITICAL"
+
+
+def test_phase10_evidence_gap_deduplicates_across_recalculation(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-dedupe")
+    first = next(item for item in project["project_intelligence"]["unresolved_issues"] if item["requirement_id"] == "sufficient_grid_capacity")
+    second_state = service.evaluate_evidence_coverage(project["project_id"])
+    second = next(item for item in second_state["unresolved_issues"] if item["requirement_id"] == "sufficient_grid_capacity")
+
+    assert second["gap_id"] == first["gap_id"]
+    assert second["created_at"] == first["created_at"]
+    assert len({item["gap_id"] for item in second_state["evidence_gaps"]}) == len(second_state["evidence_gaps"])
+
+
+def test_phase10_next_action_ranking_is_deterministic_and_prioritizes_critical_blocker(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-ranking")
+    first = service.next_actions(project["project_id"])
+    second = service.next_actions(project["project_id"])
+
+    assert [(item["action_id"], item["score"]) for item in first["prioritized_actions"]] == [
+        (item["action_id"], item["score"]) for item in second["prioritized_actions"]
+    ]
+    assert first["prioritized_actions"][0]["type"] == "UTILITY_CAPACITY_INTERCONNECTION_RFI"
+    assert first["prioritized_actions"][0]["score_provenance"]["critical_milestone"]["blocking"] is True
+
+
+def test_phase10_project_readiness_is_categorical_without_fake_percentage(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-readiness")
+    intelligence = project["project_intelligence"]
+
+    assert intelligence["project_readiness_state"] == "BLOCKED"
+    assert intelligence["readiness"]["Power"]["status"] == "CRITICAL"
+    assert intelligence["risk_state"]["critical_blockers"] >= 1
+    assert "percentage" not in json.dumps(intelligence).casefold()
+
+
+def test_phase10_generated_rfi_references_validated_missing_evidence(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-rfi")
+    action = service.next_actions(project["project_id"])["prioritized_actions"][0]
+    draft = service.create_rfi_draft(
+        project["project_id"], action["action_id"],
+        "Please confirm the capacity and interconnection pathway available for this proposed 100 MW site and identify the required study process.",
+    )
+
+    assert draft["type"] == "UTILITY_CAPACITY_INTERCONNECTION_RFI"
+    assert draft["required_evidence"] == action["required_evidence"]
+    assert "utility_confirmed_deliverable_capacity_mw" in draft["required_evidence"]
+    assert draft["human_approval_required"] is True and draft["status"] == "DRAFT"
+    refreshed_action = next(item for item in service.evaluate_evidence_coverage(project["project_id"])["recommended_actions"] if item["action_id"] == action["action_id"])
+    assert refreshed_action["status"] == "DRAFTED" and refreshed_action["rfi_id"] == draft["rfi_id"]
+
+
+def test_phase10_agent_generates_rfi_wording_for_validated_action(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-agent-rfi")
+    action = service.next_actions(project["project_id"])["prioritized_actions"][0]
+    request_text = "Please confirm deliverable capacity for the proposed 100 MW phase and identify the applicable interconnection studies and required submissions."
+    model = ScriptedModel([
+        tool("get_next_actions", {"project_id": project["project_id"]}, "actions"),
+        tool("draft_project_rfi", {"project_id": project["project_id"], "action_id": action["action_id"], "generated_request": request_text}, "draft"),
+        ModelReply(message="The utility request is drafted for your review; it has not been sent.", tool_calls=[], response_items=[]),
+    ])
+
+    response = run(SandboxAgent(model=model, diligence=service).chat_project(project["project_id"], "phase10-rfi", "Draft the highest-priority request."))
+
+    assert [item["tool"] for item in response["tool_trace"]] == ["get_next_actions", "draft_project_rfi"]
+    assert response["project"]["rfis"][0]["generated_request"] == request_text
+    assert response["project"]["rfis"][0]["human_approval_required"] is True
+
+
+def test_phase10_agent_explains_unresolved_requirement_from_structured_state(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-agent")
+    model = ScriptedModel([
+        tool("get_project_intelligence", {"project_id": project["project_id"]}, "intelligence"),
+        ModelReply(message="Power remains unresolved because utility-confirmed deliverability is missing. The first next action is a utility interconnection request.", tool_calls=[], response_items=[]),
+    ])
+
+    response = run(SandboxAgent(model=model, diligence=service).chat_project(project["project_id"], "phase10-agent", "Why is this site not ready?"))
+
+    assert response["tool_trace"][0]["tool"] == "get_project_intelligence"
+    assert "utility-confirmed deliverability is missing" in response["message"]
+
+
+def test_phase10_agent_cannot_invent_pass_fail_result(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-authority")
+    model = ScriptedModel([ModelReply(message="100 MW deliverability: PASS", tool_calls=[], response_items=[])])
+
+    response = run(SandboxAgent(model=model, diligence=service).chat_project(project["project_id"], "phase10-authority", "Is power ready?"))
+
+    assert response["message"].startswith("I cannot support that outcome claim")
+    grid = next(item for item in response["project"]["project_intelligence"]["evidence_coverage"] if item["requirement_id"] == "sufficient_grid_capacity")
+    assert grid["status"] == "UNRESOLVED"
+
+
+def test_phase10_refresh_change_recalculates_affected_project_state(monkeypatch, diligence):
+    service, _client, store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-refresh")
+    candidate = project["candidates"][0]
+    original = store.get_site_snapshot(candidate["snapshot_id"])
+    monkeypatch.setattr("app.sandbox.time.time", lambda: original["observed_at"] + 61)
+
+    plan = run(service.quote_candidate_refresh(project["project_id"], candidate["candidate_id"]))
+    refreshed = run(service.confirm_candidate_refresh(project["project_id"], candidate["candidate_id"], plan["spend_plan_id"], confirmed=True))
+    impact = refreshed["project"]["project_intelligence"]["change_impact"]
+
+    assert impact["changed_evidence_ids"]
+    assert impact["readiness_recalculated"] is True
+    assert set(impact["affected_requirement_ids"]) <= {item["constraint_id"] for item in refreshed["project"]["request"]["constraints"]}
+    assert store.get_site_snapshot(original["snapshot_id"])["raw_response_hash"] == original["raw_response_hash"]
+
+
+def test_phase10_intelligence_api_and_frontend_work_surface(monkeypatch, diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-http")
+    monkeypatch.setattr(main, "diligence_service", service)
+    http = TestClient(main.app)
+
+    intelligence = http.get(f"/v1/diligence/projects/{project['project_id']}/intelligence")
+    actions = http.post(f"/v1/diligence/projects/{project['project_id']}/next-actions")
+    markup = (Path(__file__).parents[1] / "app" / "static" / "index.html").read_text(encoding="utf-8")
+    script = (Path(__file__).parents[1] / "app" / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert intelligence.status_code == actions.status_code == 200
+    assert actions.json()["prioritized_actions"][0]["required_evidence"]
+    assert 'id="projectIntelligence"' in markup
+    assert "What should happen next" in markup and "renderProjectIntelligence" in script

@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mireye-physical-world-os"
+version = "0.14.0"
+description = "Evidence-backed physical-project intelligence and simulation platform"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+dependencies = [
+  "alembic==1.18.4",
+  "boto3==1.40.47",
+  "duckdb==1.5.5",
+  "fastapi==0.136.1",
+  "h3==4.5.0",
+  "httpx==0.28.1",
+  "nats-py==2.12.0",
+  "numpy==2.2.6",
+  "opentelemetry-api==1.41.1",
+  "opentelemetry-exporter-otlp-proto-http==1.41.1",
+  "opentelemetry-sdk==1.41.1",
+  "pillow==12.3.0",
+  "psycopg[binary]==3.2.9",
+  "pyarrow==23.0.1",
+  "pydantic==2.13.3",
+  "pydantic-settings==2.14.2",
+  "python-dotenv==1.2.2",
+  "redis==7.1.0",
+  "shapely==2.1.2",
+  "sqlalchemy==2.0.23",
+  "temporalio==1.21.0",
+  "uvicorn[standard]==0.46.0",
+]
+
+[project.optional-dependencies]
+world = ["rasterio==1.4.4"]
+
+[dependency-groups]
+test = ["playwright==1.58.0", "pytest==9.0.3"]
+dev = ["mypy==1.18.2", "pip-audit==2.9.0", "ruff==0.13.2"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "live: opt-in tests that call live providers",
+  "runtime: requires the real containerized Postgres, Redis, NATS, Temporal, and MinIO stack",
+]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 140
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+check_untyped_defs = true
+warn_unused_ignores = true
+
+[tool.uv]
+default-groups = ["test"]
