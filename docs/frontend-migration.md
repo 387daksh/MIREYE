@@ -42,6 +42,27 @@ scenario hashes, spend confirmation, or geometry validation.
    deterministic backend evaluation contracts.
 6. Remove a vanilla surface only after browser and API-contract parity tests pass.
 
+## Parity checks
+
+Contract parity runs in the frontend test suite (`npm test`, in `frontend/`):
+
+- `src/lib/api-contract.test.ts` scans the app for every `api.GET/POST(...)`
+  call and asserts the path and verb exist in `build/openapi.json`.
+- `src/lib/product-status.test.ts` reads the statuses `app/product.py` can
+  emit and asserts the intake still renders a branch for each, in both
+  directions. The product response is an untyped dict, so the generated client
+  cannot catch this on its own.
+
+Both skip with a warning when `build/openapi.json` is absent. Export it first:
+
+```
+uv run python scripts/export_openapi.py
+npm --prefix frontend run generate:api
+```
+
+Browser-level parity (rendering the migrated surfaces against a running API)
+is not yet covered.
+
 ## State ownership
 
 | State | Owner |
