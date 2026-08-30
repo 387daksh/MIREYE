@@ -210,7 +210,7 @@ For the terrain and roads demonstration:
 python scripts/live_world_snapshot_demo.py --confirm --serve
 ```
 
-This performs one confirmed parcel lookup, downloads a bounded USGS 3DEP DEM, extracts release-pinned Overture road geometry for the parcel area of interest, and prints the sandbox URL. It does not establish site suitability or data-center deliverability. See [docs/sandbox-demo.md](docs/sandbox-demo.md) for the runbook.
+This performs one confirmed parcel lookup, downloads a bounded USGS 3DEP DEM, extracts release-pinned Overture road geometry for the parcel area of interest, and prints the sandbox URL. It does not establish site suitability or BESS export/injection interconnection. See [docs/sandbox-demo.md](docs/sandbox-demo.md) for the runbook.
 
 For the full manual product path, see [docs/demo-today.md](docs/demo-today.md). For provider-specific live checks, see [docs/live-mireye.md](docs/live-mireye.md).
 

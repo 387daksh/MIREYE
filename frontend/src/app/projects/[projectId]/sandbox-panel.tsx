@@ -52,7 +52,7 @@ function proposedFeatures(scene: Value) {
   };
   const features = ((scene.proposed as Value[] | undefined) ?? []).flatMap((object) => {
     const parent = object.geometry_local as Value;
-    const parentFeature = rectangle(object, parent, Array.isArray(object.components) ? "campus_boundary" : String(object.render_class ?? "building"));
+    const parentFeature = rectangle(object, parent, Array.isArray(object.components) ? "facility_boundary" : String(object.render_class ?? "building"));
     const radians = Number(parent.rotation_deg) * Math.PI / 180;
     const center = parent.center_xy_m as number[];
     const children = ((object.components as Value[] | undefined) ?? []).map((component) => {
@@ -148,7 +148,7 @@ function addSceneLayers(map: MapLike, scene: Value, world?: Value) {
     map.addSource("sandbox-proposed", { type: "geojson", data: proposed });
     map.addLayer({ id: "sandbox-proposed-surfaces", type: "fill", source: "sandbox-proposed", filter: ["in", ["get", "render_class"], ["literal", ["surface", "access", "reserve"]]], paint: { "fill-color": ["match", ["get", "render_class"], "access", "#667178", "reserve", "#8ca17f", "#e8a082"], "fill-opacity": ["match", ["get", "render_class"], "reserve", 0.28, 0.48] } });
     map.addLayer({ id: "sandbox-proposed-extrusion", type: "fill-extrusion", source: "sandbox-proposed", filter: ["in", ["get", "render_class"], ["literal", ["building", "utility"]]], paint: { "fill-extrusion-color": ["match", ["get", "render_class"], "utility", "#b8542b", "#e95920"], "fill-extrusion-height": ["get", "height_m"], "fill-extrusion-base": 0, "fill-extrusion-opacity": 0.9 } });
-    map.addLayer({ id: "sandbox-proposed-outline", type: "line", source: "sandbox-proposed", filter: ["in", ["get", "render_class"], ["literal", ["campus_boundary", "reserve"]]], paint: { "line-color": ["match", ["get", "render_class"], "reserve", "#607558", "#b94a1a"], "line-width": ["match", ["get", "render_class"], "reserve", 1.5, 2.2], "line-dasharray": [2, 2] } });
+    map.addLayer({ id: "sandbox-proposed-outline", type: "line", source: "sandbox-proposed", filter: ["in", ["get", "render_class"], ["literal", ["facility_boundary", "reserve"]]], paint: { "line-color": ["match", ["get", "render_class"], "reserve", "#607558", "#b94a1a"], "line-width": ["match", ["get", "render_class"], "reserve", 1.5, 2.2], "line-dasharray": [2, 2] } });
   }
   const bbox = (world?.query_aoi as Value | undefined)?.bbox as number[] | undefined;
   if (bbox) map.fitBounds([[bbox[0], bbox[1]], [bbox[2], bbox[3]]], { padding: { top: 78, right: 70, bottom: 185, left: 70 }, maxZoom: 15.4, duration: 0 });

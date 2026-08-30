@@ -79,7 +79,7 @@ export function ActivityTimeline({ events }: { events: Value[] }) {
 
 export function AgentBar({ onStart, busy, error, status }: { onStart: (message: string) => Promise<void>; busy: boolean; error?: string; status?: { label: string; detail: string } }) {
   const [message, setMessage] = useState("");
-  const suggestions = ["Why is power blocked?", "What changed?", "Can this site support 100 MW?", "Show me what is still unresolved."];
+  const suggestions = ["Why is BESS interconnection blocked?", "What changed?", "Is 100 MW / 400 MWh interconnection proven?", "Show me what is still unresolved."];
   return <div className="agent-area">
     {status && <div className="agent-status" aria-live="polite"><span className="agent-orb"/><div><strong>MIREYE · {status.label}</strong><span>{status.detail}</span></div></div>}
     <div className="suggested-prompts">{suggestions.map((prompt) => <button type="button" key={prompt} onClick={() => setMessage(prompt)}>{prompt}</button>)}</div>

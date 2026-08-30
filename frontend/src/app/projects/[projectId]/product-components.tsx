@@ -26,15 +26,19 @@ export function ProjectHeader({ state }: { state: Value }) {
   const runs = list(state.orchestration_runs);
   const spec = record(runs.at(-1)?.project_spec);
   const project = title(spec.project_type || request.project || "Project");
-  const initial = optionalNumber(spec.initial_capacity_mw ?? request.capacity_mw);
-  const expansion = optionalNumber(spec.expansion_capacity_mw ?? record(request.power_requirements).expansion_mw);
+  const storage = record(request.storage_requirements);
+  const initial = optionalNumber(storage.phase_1_power_mw ?? spec.initial_capacity_mw ?? request.capacity_mw);
+  const initialEnergy = optionalNumber(storage.phase_1_energy_mwh);
+  const duration = optionalNumber(storage.duration_hours);
+  const expansion = optionalNumber(storage.expansion_power_mw ?? spec.expansion_capacity_mw);
+  const expansionEnergy = optionalNumber(storage.expansion_energy_mwh);
   const site = String(record(state.project_intelligence).active_site ? record(record(state.project_intelligence).active_site).title : "Site pending");
   const readiness = words(record(state.project_intelligence).project_readiness_state || "Assessing");
   return <section className="project-header">
     <div><span className="eyebrow">Project</span><h1>{initial !== undefined && Number.isFinite(initial) ? `${initial} MW ` : ""}{project}</h1></div>
     <dl className="project-facts">
-      <div><dt>Phase 1</dt><dd>{initial !== undefined && Number.isFinite(initial) ? `${initial} MW` : "—"}</dd></div>
-      <div><dt>Expansion</dt><dd>{expansion !== undefined && Number.isFinite(expansion) ? `${expansion} MW` : "Not set"}</dd></div>
+      <div><dt>Phase 1</dt><dd>{initial !== undefined && initialEnergy !== undefined && duration !== undefined ? `${initial} MW / ${initialEnergy} MWh / ${duration} h` : "—"}</dd></div>
+      <div><dt>Expansion</dt><dd>{expansion !== undefined && expansionEnergy !== undefined && duration !== undefined ? `${expansion} MW / ${expansionEnergy} MWh / ${duration} h` : "Not set"}</dd></div>
       <div><dt>Site</dt><dd>{site}</dd></div>
     </dl>
     <span className={`project-state state-${readiness.toLowerCase()}`}>{title(readiness)}</span>
@@ -169,13 +173,13 @@ export function MemoryContext({ state }: { state: Value }) {
   const decisions = list(state.decision_history).slice(-2).reverse();
   const active = record(intelligence.active_site);
   const snapshotId = String(active.site_snapshot_id ?? evidence[0]?.snapshot_id ?? "");
-  const power = coverage.find((item) => String(item.requirement_id) === "sufficient_grid_capacity");
+  const power = coverage.find((item) => String(item.requirement_id) === "bess_export_interconnection");
   const powerIds = Array.isArray(power?.evidence_ids) ? power.evidence_ids.map(String) : [];
   const sources = evidence.filter((item) => powerIds.includes(String(item.evidence_id))).slice(0, 3);
   return <section className="intel-section memory-context"><h3>Context</h3>
     <span className="eyebrow">Current</span><strong>{String(active.title ?? "Selected site")}</strong>
     <p>{evidence.length} source-backed records · {snapshotId ? "Current snapshot available" : "No active snapshot"}</p>
-    {power && <details open><summary>Why power is {title(power.status)}</summary><p>{String(blockers.find((item) => String(item.requirement_id) === String(power.requirement_id))?.description ?? "Current evidence does not establish committed deliverability.")}</p>
+    {power && <details open><summary>Why interconnection is {title(power.status)}</summary><p>{String(blockers.find((item) => String(item.requirement_id) === String(power.requirement_id))?.description ?? "Current evidence does not establish export or injection interconnection capability.")}</p>
       <ul className="memory-sources">{sources.map((item) => <li key={String(item.evidence_id)}><span>{words(item.evidence_id)}</span><em>{String(item.source ?? item.provider ?? "Source")}</em></li>)}</ul>
       <a href="#sources">View supporting evidence <span aria-hidden="true">â†—</span></a>
     </details>}

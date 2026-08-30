@@ -51,7 +51,7 @@ def spec_payload(*, hard=None, soft=None, unknowns=None, assumptions=None):
     return {
         "schema_version": "project_spec_v1",
         "source_request": "model copy",
-        "project_type": "DATA_CENTER",
+        "project_type": "BESS",
         "geography": {"country": "US", "state": "Texas"},
         "initial_capacity_mw": 100,
         "expansion_capacity_mw": 300,
@@ -125,7 +125,7 @@ def project_service(tmp_path):
     service = DiligenceService(store, SiteSnapshotService(store, FakeMireye()), FakeWorlds())
     project = service.create_project(
         workspace_id="workspace-ai",
-        message="Compare sites for a 100 MW data center close to transmission.",
+        message="Compare sites for a 100 MW / 400 MWh BESS close to transmission.",
         candidates=["1 Main Street, Austin, TX"],
     )
     return service, store, project
@@ -340,8 +340,8 @@ def test_tool_policy_blocks_metered_work_without_application_confirmation():
 def test_verifier_catches_unsupported_claim_and_stale_evidence():
     claim = {
         "claim_id": "c1",
-        "text": "Power is available.",
-        "requirement_id": "sufficient_grid_capacity",
+        "text": "BESS export/injection interconnection is available.",
+        "requirement_id": "bess_export_interconnection",
         "evidence_ids": ["grid"],
         "required_scope": "REGION",
         "asserted_outcome": "PASS",
@@ -359,7 +359,7 @@ def test_verifier_catches_unsupported_claim_and_stale_evidence():
                     "semantic_strength": "SOURCE_BACKED_SIGNAL",
                 }
             ],
-            "deterministic_outcomes": {"sufficient_grid_capacity": "UNRESOLVED"},
+            "deterministic_outcomes": {"bess_export_interconnection": "UNRESOLVED"},
         },
     )
     assert result.state.value == "UNSUPPORTED" and result.replan_required
@@ -538,23 +538,23 @@ def test_orchestration_api_contract_is_exposed_without_replacing_existing_chat()
 
 def test_typed_model_contexts_exclude_unrelated_state_and_payloads():
     context = {
-        "project_id": "project_1", "workspace_id": "workspace_1", "request": {"project": "Data center"},
+        "project_id": "project_1", "workspace_id": "workspace_1", "request": {"project": "Battery energy storage system"},
         "project_spec": spec_payload(hard=[{
-            "constraint_id": "sufficient_grid_capacity", "classification": "HARD", "parameters": {}, "reason": "Power",
+            "constraint_id": "bess_export_interconnection", "classification": "HARD", "parameters": {}, "reason": "Interconnection",
         }]),
         "project_intelligence": {
             "evidence_coverage": [
-                {"requirement_id": "sufficient_grid_capacity", "domain": "Power", "evidence_ids": ["power_1"]},
+                {"requirement_id": "bess_export_interconnection", "domain": "Power", "evidence_ids": ["power_1"]},
                 {"requirement_id": "parcel_acreage_range", "domain": "Land", "evidence_ids": ["land_1"]},
             ],
-            "evidence_gaps": [{"gap_id": "gap_power", "requirement_id": "sufficient_grid_capacity", "domain": "Power"}],
-            "recommended_actions": [{"action_id": "action_power", "gap_id": "gap_power", "requirement_id": "sufficient_grid_capacity"}],
+            "evidence_gaps": [{"gap_id": "gap_power", "requirement_id": "bess_export_interconnection", "domain": "Power"}],
+            "recommended_actions": [{"action_id": "action_power", "gap_id": "gap_power", "requirement_id": "bess_export_interconnection"}],
         },
         "evidence_items": [
             {"evidence_id": "power_1", "status": "ok", "source": "MIREYE", "payload": "must not be copied"},
             {"evidence_id": "land_1", "status": "ok", "source": "MIREYE", "payload": "unrelated"},
         ],
-        "deterministic_outcomes": {"sufficient_grid_capacity": "UNRESOLVED", "parcel_acreage_range": "PASS"},
+        "deterministic_outcomes": {"bess_export_interconnection": "UNRESOLVED", "parcel_acreage_range": "PASS"},
         "action_decisions": [
             {"gap_id": "gap_power", "action_id": "action_power", "selection": "keep_unresolved", "status": "DEFERRED"},
             {"gap_id": "gap_land", "action_id": "action_land", "selection": "authorize_next_action", "status": "AUTHORIZED"},
@@ -570,7 +570,7 @@ def test_typed_model_contexts_exclude_unrelated_state_and_payloads():
 
     assert [item["evidence_id"] for item in packet["evidence_items"]] == ["power_1"]
     assert "payload" not in packet["evidence_items"][0]
-    assert list(packet["deterministic_outcomes"]) == ["sufficient_grid_capacity"]
+    assert list(packet["deterministic_outcomes"]) == ["bess_export_interconnection"]
     assert packet["user_decisions"] == [{
         "gap_id": "gap_power", "action_id": "action_power", "selection": "keep_unresolved", "status": "DEFERRED",
     }]
@@ -578,42 +578,42 @@ def test_typed_model_contexts_exclude_unrelated_state_and_payloads():
 
 
 def test_project_spec_model_schema_only_allows_application_capabilities():
-    schema = _project_spec_schema({"sufficient_grid_capacity": {}, "data_center_entitlement": {}})
+    schema = _project_spec_schema({"bess_export_interconnection": {}, "energy_storage_entitlement": {}})
     definitions = schema["$defs"]
 
     assert definitions["ConstraintIntent"]["properties"]["constraint_id"]["enum"] == [
-        "data_center_entitlement", "sufficient_grid_capacity",
+        "bess_export_interconnection", "energy_storage_entitlement",
     ]
     assert definitions["Unknown"]["properties"]["affected_constraints"]["items"]["enum"] == [
-        "data_center_entitlement", "sufficient_grid_capacity",
+        "bess_export_interconnection", "energy_storage_entitlement",
     ]
 
 
 def test_specialist_schema_only_allows_scoped_application_requirements():
-    schema = _observation_schema(["sufficient_grid_capacity"])
+    schema = _observation_schema(["bess_export_interconnection"])
 
     assert schema["$defs"]["Claim"]["properties"]["requirement_id"]["anyOf"][0]["enum"] == [
-        "sufficient_grid_capacity",
+        "bess_export_interconnection",
     ]
     assert schema["$defs"]["DecisionProposal"]["properties"]["constraint_targets"]["items"]["enum"] == [
-        "sufficient_grid_capacity",
+        "bess_export_interconnection",
     ]
 
 
 def test_missing_model_decision_uses_existing_canonical_evidence_gap():
     proposal = OrchestrationEngine._application_decision({
-        "deterministic_outcomes": {"sufficient_grid_capacity": "UNRESOLVED"},
+        "deterministic_outcomes": {"bess_export_interconnection": "UNRESOLVED"},
         "project_intelligence": {
             "evidence_gaps": [{
-                "gap_id": "gap_power", "requirement_id": "sufficient_grid_capacity", "status": "OPEN",
-                "description": "Utility deliverability is not confirmed.", "why_it_matters": "100 MW is required.", "impact": "CRITICAL",
+                "gap_id": "gap_power", "requirement_id": "bess_export_interconnection", "status": "OPEN",
+                "description": "BESS export/injection interconnection is not confirmed.", "why_it_matters": "100 MW is required.", "impact": "CRITICAL",
             }],
             "recommended_actions": [{"action_id": "action_power", "gap_id": "gap_power"}],
         },
     })
 
     assert proposal is not None
-    assert proposal.constraint_targets == ["sufficient_grid_capacity"]
+    assert proposal.constraint_targets == ["bess_export_interconnection"]
 
 
 def test_model_usage_is_attributed_per_orchestration_module():

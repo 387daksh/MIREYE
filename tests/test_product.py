@@ -56,19 +56,20 @@ def _service(tmp_path):
 
 
 def test_constraint_compiler_extracts_request_without_claiming_unsupported_semantics():
-    compiled = compile_request("Find me a good site for a 100 MW data center in Texas, 20-50 acres, low flood risk, close to transmission and roads, with sufficient grid capacity.")
+    compiled = compile_request("Find me a good site for a 100 MW / 400 MWh BESS in Texas, 20-50 acres, low flood risk, close to transmission and roads, with sufficient grid capacity.")
 
     assert compiled["capacity_mw"] == 100
     assert compiled["acreage"] == [20, 50]
     assert compiled["region"] == "Texas"
     assert {item["constraint_id"] for item in compiled["constraints"]} >= {
-        "parcel_acreage_range", "parcel_outside_fema_sfha", "transmission_proximity", "legal_access", "sufficient_grid_capacity",
+        "parcel_acreage_range", "parcel_outside_fema_sfha", "transmission_proximity", "legal_access", "bess_export_interconnection", "energy_storage_entitlement",
     }
+    assert compiled["project"] == "Battery energy storage system"
 
 
 def test_broad_discovery_is_honest_and_does_not_call_mireye(tmp_path):
     service, client = _service(tmp_path)
-    result = asyncio.run(service.start("Find me a 100 MW data center site in Texas."))
+    result = asyncio.run(service.start("Find me a 100 MW / 400 MWh BESS site in Texas."))
 
     assert result["status"] == "DISCOVERY_UNAVAILABLE"
     assert result["stages"][1]["status"] == "unavailable"
@@ -80,7 +81,7 @@ def test_broad_discovery_is_honest_and_does_not_call_mireye(tmp_path):
 def test_specific_property_added_to_a_broad_request_uses_the_real_property_flow(tmp_path):
     service, client = _service(tmp_path)
 
-    result = asyncio.run(service.start("Find a 100 MW data center site in Texas at 1 Real Parcel Way"))
+    result = asyncio.run(service.start("Find a 100 MW / 400 MWh BESS site in Texas at 1 Real Parcel Way"))
 
     assert result["status"] == "CONFIRMATION_REQUIRED"
     assert client.lookup_calls == 1

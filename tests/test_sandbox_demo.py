@@ -75,8 +75,9 @@ def test_demo_provisions_and_exercises_persisted_flow(tmp_path):
     assert first["evaluation"]["overall_status"] == "PASS"
 
     move = call("transform_object", {
-        "object_id": "data_center_1", "operation": "move", "delta_x_m": 10, "delta_y_m": 0,
-        "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None,
+        "object_id": "bess_1", "operation": "move", "delta_x_m": 10, "delta_y_m": 0,
+        "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None,
+        "power_mw": None, "energy_mwh": None, "duration_hours": None,
     }, "move-1")
     evaluate = call("evaluate_scenario", {"requested_constraints": [{
         "constraint_id": "footprint_inside_parcel", "object_id": None, "minimum_m": None,

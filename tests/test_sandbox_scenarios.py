@@ -63,10 +63,10 @@ def test_accepted_chat_mutation_creates_revision_and_rejected_call_does_not(tmp_
     def reply(name, arguments):
         return ModelReply("", [{"id": name, "name": name, "arguments": json.dumps(arguments)}], [])
 
-    create = reply("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": None})
+    create = reply("propose_bess_facility", {"power_mw": 100, "energy_mwh": 400, "duration_hours": 4, "expansion_power_mw": 300, "expansion_energy_mwh": 1200, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": None})
     final = ModelReply("done", [], [])
     agent = SandboxAgent(model=Model([create, final]), sessions=InMemorySandboxSessions(), scenarios=service)
-    response = _run(agent.chat(site, "session", "Place a 100 MW data center."))
+    response = _run(agent.chat(site, "session", "Place a 100 MW / 400 MWh BESS."))
     scenario_id = response["scenario"]["scenario_id"]
     assert len(service.list_revisions(scenario_id)) == 1
 
@@ -75,7 +75,7 @@ def test_accepted_chat_mutation_creates_revision_and_rejected_call_does_not(tmp_
     assert rejected["tool_trace"][0]["status"] == "rejected"
     assert len(service.list_revisions(scenario_id)) == 1
 
-    move = reply("transform_object", {"object_id": "data_center_1", "operation": "move", "delta_x_m": 50, "delta_y_m": 0, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None})
+    move = reply("transform_object", {"object_id": "bess_1", "operation": "move", "delta_x_m": 50, "delta_y_m": 0, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None})
     moved = _run(SandboxAgent(model=Model([move, final]), sessions=agent.sessions, scenarios=service).chat(site, "session", "Move it east."))
     assert moved["scenario"]["revision"] == 2
     assert len(service.list_revisions(scenario_id)) == 2
@@ -93,7 +93,7 @@ def test_branch_and_comparison_detect_geometry_metrics_and_constraints(tmp_path)
 
     assert branch["parent_scenario_id"] == base["scenario_id"]
     assert moved["revision"] == 2
-    assert comparison["object_changes"]["data_center_1"]["change"] == "modified"
+    assert comparison["object_changes"]["bess_1"]["change"] == "modified"
     assert comparison["metric_changes"]
     assert comparison["constraint_changes"]["footprint_inside_parcel"]["after"]["outcome"] == "FAIL"
     assert comparison["evaluation_versions"]["left"]["evaluator_version"] == "site_sandbox_evidence_v1"

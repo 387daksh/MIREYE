@@ -13,7 +13,14 @@ from typing import Any, Protocol
 
 from app.config import MIREYE_ENRICHMENT_BATCH_SIZE
 from app.infrastructure.observability import traced_async
-from app.product import compile_request
+from app.product import (
+    BESS_DURATION_HOURS,
+    BESS_EXPANSION_ENERGY_MWH,
+    BESS_EXPANSION_POWER_MW,
+    BESS_PHASE_ENERGY_MWH,
+    BESS_PHASE_POWER_MW,
+    compile_request,
+)
 from app.project_changes import changes_from_refresh, changes_from_world_refresh
 from app.project_intelligence import RFI_ACTION_TYPES, build_project_intelligence
 from app.project_readiness import AuthoritativeSourceService, build_entitlement_state, build_power_readiness
@@ -58,9 +65,9 @@ CONSTRAINT_FIELDS = {
     "road_proximity": ("nearest_major_road_distance_m", "nearest_major_road_name"),
     "parcel_zoning_code_in": ("parcel_zoning",),
     "industrial_zoning": ("parcel_zoning",),
-    "data_center_entitlement": ("parcel_zoning", "political_county", "political_locality", "political_region"),
+    "energy_storage_entitlement": ("parcel_zoning", "political_county", "political_locality", "political_region"),
     "zoning_context": ("parcel_zoning",),
-    "sufficient_grid_capacity": (
+    "bess_export_interconnection": (
         "nearest_substation_distance_m", "nearest_substation_status", "nearest_substation_max_voltage_kv",
         "nearest_transmission_line_distance_m", "nearest_transmission_line_voltage_kv",
         "nearest_transmission_line_voltage_class", "nearest_transmission_line_voltage_basis",
@@ -144,7 +151,7 @@ CONSTRAINT_CAPABILITIES = {
             "required_statuses": {"type": "string_list", "unit": None}, "require_operational": {"type": "boolean", "unit": None},
         }},
         "evidence_fields": list(CONSTRAINT_FIELDS["max_resolution_point_substation_distance_m"]), "spatial_scope": "POINT_TO_NEAREST_FEATURE", "evaluator_support": "PASS_FAIL",
-        "unsupported_semantics": ["available MW", "deliverability"], "confirmation_mandatory": False, "assumption_allowed": True,
+        "unsupported_semantics": ["available export or injection MW", "interconnection capability"], "confirmation_mandatory": False, "assumption_allowed": True,
     },
     "max_resolution_point_transmission_distance_m": {
         "semantic_description": "Compare resolution-point distance to the nearest mapped transmission line.",
@@ -153,7 +160,7 @@ CONSTRAINT_CAPABILITIES = {
             "required_statuses": {"type": "string_list", "unit": None},
         }},
         "evidence_fields": list(CONSTRAINT_FIELDS["max_resolution_point_transmission_distance_m"]), "spatial_scope": "POINT_TO_NEAREST_FEATURE", "evaluator_support": "PASS_FAIL",
-        "unsupported_semantics": ["available MW", "deliverability"], "confirmation_mandatory": False, "assumption_allowed": True,
+        "unsupported_semantics": ["available export or injection MW", "interconnection capability"], "confirmation_mandatory": False, "assumption_allowed": True,
     },
     "max_resolution_point_major_road_distance_m": {
         "semantic_description": "Compare resolution-point distance to the nearest mapped major road.",
@@ -177,10 +184,10 @@ CONSTRAINT_CAPABILITIES = {
         "evaluator_support": "UNRESOLVED_ONLY", "unsupported_semantics": ["raw codes do not establish industrial use"],
         "confirmation_mandatory": False, "assumption_allowed": False,
     },
-    "data_center_entitlement": {
-        "semantic_description": "Request a jurisdiction-specific data-center permitted-use and approval-path determination.",
+    "energy_storage_entitlement": {
+        "semantic_description": "Request a jurisdiction-specific energy-storage permitted-use and approval-path determination.",
         "input_schema": {"required": [], "properties": {}},
-        "evidence_fields": list(CONSTRAINT_FIELDS["data_center_entitlement"]), "spatial_scope": "SITE",
+        "evidence_fields": list(CONSTRAINT_FIELDS["energy_storage_entitlement"]), "spatial_scope": "SITE",
         "evaluator_support": "UNRESOLVED_ONLY",
         "unsupported_semantics": ["raw zoning and postal locality do not establish permitted use or entitlement"],
         "confirmation_mandatory": False, "assumption_allowed": False,
@@ -191,12 +198,12 @@ CONSTRAINT_CAPABILITIES = {
         "spatial_scope": "PARCEL", "evaluator_support": "UNRESOLVED_ONLY",
         "unsupported_semantics": ["mapped-road proximity does not prove legal access"], "confirmation_mandatory": False, "assumption_allowed": False,
     },
-    "sufficient_grid_capacity": {
-        "semantic_description": "Request utility-confirmed grid capacity or deliverability.",
+    "bess_export_interconnection": {
+        "semantic_description": "Request utility- or ISO-confirmed BESS export or injection interconnection capability.",
         "input_schema": {"required": [], "properties": {}},
-        "evidence_fields": list(CONSTRAINT_FIELDS["sufficient_grid_capacity"]), "spatial_scope": "SITE",
+        "evidence_fields": list(CONSTRAINT_FIELDS["bess_export_interconnection"]), "spatial_scope": "SITE",
         "evaluator_support": "UNRESOLVED_ONLY",
-        "unsupported_semantics": ["proximity, voltage, status, and queue context do not prove deliverability"],
+        "unsupported_semantics": ["proximity, voltage, status, and queue context do not prove export or injection interconnection capability"],
         "confirmation_mandatory": False, "assumption_allowed": False,
     },
     "water_capacity": {
@@ -518,11 +525,11 @@ def compile_project_request(message: str) -> dict:
         constraints.append({"constraint_id": "water_capacity"})
     if any(phrase in lower for phrase in ("fiber diversity", "diverse fiber", "redundant fiber routes")):
         constraints.append({"constraint_id": "fiber_diversity"})
-    if compiled.get("project") == "Data center" and isinstance(compiled.get("capacity_mw"), (int, float)):
-        if not any(item["constraint_id"] == "sufficient_grid_capacity" for item in constraints):
-            constraints.append({"constraint_id": "sufficient_grid_capacity"})
-        if not any(item["constraint_id"] in {"data_center_entitlement", "industrial_zoning"} for item in constraints):
-            constraints.append({"constraint_id": "data_center_entitlement"})
+    if compiled.get("project") == "Battery energy storage system":
+        if not any(item["constraint_id"] == "bess_export_interconnection" for item in constraints):
+            constraints.append({"constraint_id": "bess_export_interconnection"})
+        if not any(item["constraint_id"] == "energy_storage_entitlement" for item in constraints):
+            constraints.append({"constraint_id": "energy_storage_entitlement"})
     requested_context = (
         ("land_size_context", "land size" in lower or "acreage" in lower, {"parcel_acreage_range"}),
         ("wetland_context", "wetland" in lower, {"max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel"}),
@@ -538,11 +545,7 @@ def compile_project_request(message: str) -> dict:
         if item not in deduped:
             deduped.append(item)
     deduped, requirement_gaps, assumptions_permitted = _requirement_gaps(deduped, text)
-    expansion = re.search(r"(?:expand(?:able)?\s+(?:to|target)|expansion(?:\s+target)?(?:\s+of|\s*:)?)[^\d]{0,20}(\d+(?:\.\d+)?)\s*mw", lower)
     energization = re.search(r"(?:target\s+)?energization\s+date\s*[:=]?\s*(\d{4}-\d{2}-\d{2})", lower)
-    reliability = next((value for phrase, value in (("n+1", "N+1"), ("n+2", "N+2"), ("tier iv", "Tier IV"), ("tier iii", "Tier III")) if phrase in lower), None)
-    redundancy = next((value for phrase, value in (("dual feed", "dual feed"), ("two independent feeds", "two independent feeds"), ("redundant feed", "redundant feed")) if phrase in lower), None)
-    load_profile = [value for phrase, value in (("24/7", "24/7"), ("24x7", "24/7"), ("constant load", "constant load")) if phrase in lower]
     return {
         **compiled,
         "constraints": deduped,
@@ -551,12 +554,13 @@ def compile_project_request(message: str) -> dict:
         "requirement_status": "REVIEW_REQUIRED" if requirement_gaps else "READY",
         "requirement_gaps": requirement_gaps,
         "assumptions_permitted": assumptions_permitted,
-        "power_requirements": {
-            "phase_1_mw": compiled.get("capacity_mw"),
-            "expansion_mw": float(expansion.group(1)) if expansion else None,
+        "storage_requirements": {
+            "phase_1_power_mw": BESS_PHASE_POWER_MW,
+            "phase_1_energy_mwh": BESS_PHASE_ENERGY_MWH,
+            "duration_hours": BESS_DURATION_HOURS,
+            "expansion_power_mw": BESS_EXPANSION_POWER_MW,
+            "expansion_energy_mwh": BESS_EXPANSION_ENERGY_MWH,
             "target_energization_date": energization.group(1) if energization else None,
-            "reliability_requirement": reliability, "redundancy_requirement": redundancy,
-            "load_profile_characteristics": list(dict.fromkeys(load_profile)),
         },
         "compiler_version": "diligence_constraints_v3",
     }
@@ -1773,7 +1777,7 @@ class DiligenceService:
         power = project.get("power_readiness_by_site", {}).get(action.get("site_id"))
         entitlement = project.get("entitlement_by_site", {}).get(action.get("site_id"))
         return {
-            "project_requirements": copy.deepcopy(project.get("request", {}).get("power_requirements", {})),
+            "project_requirements": copy.deepcopy(project.get("request", {}).get("storage_requirements", {})),
             "site": {
                 "site_id": action.get("site_id"), "parcel_id": identity.get("parcel_id"),
                 "address": identity.get("parcel_address"), "selected_point": copy.deepcopy(identity.get("selected_point")),

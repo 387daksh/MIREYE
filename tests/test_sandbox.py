@@ -256,7 +256,7 @@ def test_fresh_provider_absence_is_unresolved_but_not_requoted(sandbox):
     assert snapshot["evidence"]["parcel_zoning"]["value"] is None
 
 
-def test_data_center_intelligence_plan_uses_preset_plus_only_catalog_supplements(sandbox):
+def test_bess_intelligence_plan_uses_provider_preset_plus_only_catalog_supplements(sandbox):
     service, client, _store = sandbox
     snapshot = _run(service.create_snapshot(workspace_id="ws-1", lat=32.0, lng=-97.0, confirmed=True))
     catalog = client._catalog()
@@ -273,7 +273,7 @@ def test_data_center_intelligence_plan_uses_preset_plus_only_catalog_supplements
     assert plan["profile"] == "data_center_siting"
     assert plan["preset_fields"] == ["nearest_power_plant_sector", "slope_degrees"]
     assert "parcel_owner" in plan["supplemental_fields"]
-    assert plan["known_gaps"][0]["requested_field"] == "site_deliverable_grid_capacity_mw"
+    assert plan["known_gaps"][0]["requested_field"] == "utility_or_iso_confirmed_export_injection_capacity_mw"
     assert spend["preset"] is None
     assert spend["fetch_fields"] == sorted({
         "nearest_power_plant_sector", "parcel_owner", "parcel_id", "parcel_boundary_geojson",
@@ -306,7 +306,9 @@ def test_scene_loads_observed_parcel_geometry(sandbox):
     assert boundary["geometry"] == snapshot["geometry"]
     assert resolution_point["geometry"]["coordinates"] == [-97.0, 32.0]
     assert scene["proposed"][0]["attributes"]["capacity_mw"] == 100
-    assert scene["proposed"][0]["kind"] == "data_center_campus"
+    assert scene["proposed"][0]["kind"] == "bess_facility"
+    assert scene["proposed"][0]["attributes"]["energy_mwh"] == 400
+    assert scene["proposed"][0]["attributes"]["duration_hours"] == 4
     assert scene["render_contract"]["future_outputs"] == ["rgb", "depth", "semantic_segmentation", "proposed_geometry_metadata"]
 
 
@@ -335,13 +337,13 @@ def test_scene_state_is_deterministic_and_missing_snapshot_is_explicit(sandbox):
         service.scene_state("missing-snapshot")
 
 
-def test_sandbox_ui_uses_grounded_world_context_and_decision_oriented_campus():
+def test_sandbox_ui_uses_grounded_world_context_and_decision_oriented_bess():
     root = Path(__file__).resolve().parents[1]
     markup = (root / "app/static/sandbox.html").read_text(encoding="utf-8")
     script = (root / "app/static/sandbox.js").read_text(encoding="utf-8")
 
     assert 'id="feasibilityCards"' in markup
-    assert "100 MW AI Data Center" in markup
+    assert "100 MW / 400 MWh BESS" in markup
     assert "Expansion target" in markup
     assert "world-terrain-hillshade" in script
     assert "world-roads-casing" in script

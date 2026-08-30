@@ -154,7 +154,7 @@ def _scene() -> dict:
             {"id": "resolution_point", "geometry": {"type": "Point", "coordinates": [-97.0, 32.0]}},
         ],
         "derived": [{"id": "parcel_centroid", "geometry": {"type": "Point", "coordinates": [-97.0, 32.0]}}],
-        "proposed": [{"id": "campus", "geometry_local": {"center_xy_m": [0, 0], "width_m": 120, "length_m": 150, "height_m": 24, "rotation_deg": 10}, "components": [{"id": "phase-1", "render_class": "building", "geometry_relative": {"center_uv": [0, 0], "width_ratio": .45, "length_ratio": .52, "height_m": 24, "rotation_offset_deg": 0}}, {"id": "reserve", "render_class": "reserve", "geometry_relative": {"center_uv": [.3, .15], "width_ratio": .25, "length_ratio": .3, "height_m": 0, "rotation_offset_deg": 0}}]}],
+        "proposed": [{"id": "bess_1", "geometry_local": {"center_xy_m": [0, 0], "width_m": 120, "length_m": 150, "height_m": 4, "rotation_deg": 10}, "components": [{"id": "battery_enclosure_a", "render_class": "building", "geometry_relative": {"center_uv": [0, 0], "width_ratio": .45, "length_ratio": .52, "height_m": 4, "rotation_offset_deg": 0}}, {"id": "reserve", "render_class": "reserve", "geometry_relative": {"center_uv": [.3, .15], "width_ratio": .25, "length_ratio": .3, "height_m": 0, "rotation_offset_deg": 0}}]}],
     }
 
 

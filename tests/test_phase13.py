@@ -148,7 +148,7 @@ def test_check_now_skips_current_fetch_then_quotes_confirms_and_records_t2(tmp_p
     service = DiligenceService(store, SiteSnapshotService(store, client), FakeWorlds())
     project = _phase10_enrich(
         service,
-        "Compare one site for a 100 MW data center, 20-50 acres, resolution point outside flood, within 2 km of transmission and within 1 km of road, with sufficient grid capacity.",
+        "Compare one site for a 100 MW / 400 MWh BESS, 20-50 acres, resolution point outside flood, within 2 km of transmission and within 1 km of road, with sufficient grid capacity.",
         "workspace-phase13",
     )
     snapshot = copy.deepcopy(store.get_site_snapshot(project["candidates"][0]["snapshot_id"]))

@@ -71,9 +71,9 @@
 .feasibility-card > div { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
 .feasibility-card strong { font-size: 10px; }
 .feasibility-card p { margin: 7px 0 0; color: var(--muted); font-size: 9px; line-height: 1.4; }
-.campus-elements { margin: 14px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line-soft); }
-.campus-elements li { padding: 7px 0; display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line-soft); font-size: 10px; }
-.campus-elements small { color: var(--subtle); font-size: 9px; }
+.facility-elements { margin: 14px 0 0; padding: 0; list-style: none; border-top: 1px solid var(--line-soft); }
+.facility-elements li { padding: 7px 0; display: flex; justify-content: space-between; gap: 10px; border-bottom: 1px solid var(--line-soft); font-size: 10px; }
+.facility-elements small { color: var(--subtle); font-size: 9px; }
 .caveat { margin: 14px 0 0; color: var(--subtle); font-size: 10px; line-height: 1.5; }
 .scenario-count { color: var(--muted); font-size: 10px; }
 .field-label { display: block; margin: 14px 0 5px; color: var(--muted); font-size: 10px; }

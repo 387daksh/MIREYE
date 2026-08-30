@@ -1686,7 +1686,7 @@ export interface components {
          * ProjectType
          * @enum {string}
          */
-        ProjectType: "DATA_CENTER" | "SOLAR" | "INDUSTRIAL" | "LOGISTICS" | "RENEWABLE" | "PROPERTY_DILIGENCE" | "INFRASTRUCTURE" | "GENERIC";
+        ProjectType: "BESS" | "SOLAR" | "INDUSTRIAL" | "LOGISTICS" | "RENEWABLE" | "PROPERTY_DILIGENCE" | "INFRASTRUCTURE" | "GENERIC";
         /** RunAccounting */
         RunAccounting: {
             /** Completed At */
@@ -3780,7 +3780,7 @@ export interface operations {
     quote_sandbox_refresh_v1_sandbox_site__snapshot_id__refresh_quote_post: {
         parameters: {
             query?: {
-                profile?: "data_center_siting" | null;
+                profile?: "bess_siting" | null;
             };
             header?: never;
             path: {

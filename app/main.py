@@ -49,7 +49,7 @@ from app.project_readiness import AuthoritativeSourceService
 from app.sandbox_agent import ModelUnavailableError, SandboxAgent, ToolValidationError
 from app.sandbox_evaluator import SceneValidationError, evaluate_site
 from app.sandbox_scenarios import ScenarioError, ScenarioService
-from app.sandbox import ConfirmationRequired, MireyeUnavailableError, ParcelIdentityError, SandboxError, SiteSnapshotService
+from app.sandbox import BESS_SITING_PRESET, ConfirmationRequired, MireyeUnavailableError, ParcelIdentityError, SandboxError, SiteSnapshotService
 from app.workspace.engine import WorkspaceEngine
 from app.world import WorldError, WorldSnapshotService
 
@@ -934,10 +934,10 @@ async def get_sandbox_intelligence_plan(snapshot_id: str):
 @app.post("/v1/sandbox/site/{snapshot_id}/refresh/quote")
 async def quote_sandbox_refresh(
     snapshot_id: str,
-    profile: Literal["data_center_siting"] | None = Query(default=None),
+    profile: Literal["bess_siting"] | None = Query(default=None),
 ):
     try:
-        return await sandbox_service.quote_refresh(snapshot_id, project_profile=profile)
+        return await sandbox_service.quote_refresh(snapshot_id, project_profile=BESS_SITING_PRESET if profile else None)
     except MireyeUnavailableError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except SandboxError as exc:

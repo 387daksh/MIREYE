@@ -94,20 +94,20 @@ def executor():
 def test_natural_language_create_and_evaluate_flow_uses_tools_only():
     model = ScriptedModel([
         call("get_site_context", {"snapshot_id": "site-agent-test"}),
-        call("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": ["data_halls", "electrical_area", "cooling_plant", "internal_access", "expansion_reserve"]}),
+        call("propose_bess_facility", {"power_mw": 100, "energy_mwh": 400, "duration_hours": 4, "expansion_power_mw": 300, "expansion_energy_mwh": 1200, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": ["battery_enclosures", "inverter_pcs", "point_of_interconnection", "internal_access", "expansion_reserve"]}),
         call("evaluate_scenario", {"requested_constraints": [
             {"constraint_id": "footprint_inside_parcel"}, {"constraint_id": "footprint_area"}, {"constraint_id": "parcel_coverage", "max_percent": 20},
         ]}),
-        ModelReply(message="The conceptual 100 MW data center was evaluated using the deterministic sandbox.", tool_calls=[], response_items=[]),
+        ModelReply(message="The conceptual 100 MW / 400 MWh BESS was evaluated using the deterministic sandbox.", tool_calls=[], response_items=[]),
     ])
     agent = SandboxAgent(model=model, sessions=InMemorySandboxSessions())
 
-    response = _run(agent.chat(snapshot(), "session-1", "Put a 100 MW data center on this parcel."))
+    response = _run(agent.chat(snapshot(), "session-1", "Put a 100 MW / 400 MWh BESS on this parcel."))
 
     assert response["evaluation"]["overall_status"] == "PASS"
     assert response["scene_state"]["proposed"][0]["attributes"]["capacity_mw"] == 100
     assert "service_parking" not in {item["kind"] for item in response["scene_state"]["proposed"][0]["components"]}
-    assert [item["tool"] for item in response["tool_trace"]] == ["get_site_context", "propose_data_center", "evaluate_scenario"]
+    assert [item["tool"] for item in response["tool_trace"]] == ["get_site_context", "propose_bess_facility", "evaluate_scenario"]
     assert "snapshot_id: site-agent-test" in model.calls[0]["input"][0]["content"]
     assert all("mireye" not in item["tool"] for item in response["tool_trace"])
 
@@ -115,37 +115,39 @@ def test_natural_language_create_and_evaluate_flow_uses_tools_only():
 def test_move_resize_and_rotate_validate_mutable_proposal():
     _site, tools = executor()
     original = copy.deepcopy(tools.session.scene_state["proposed"][0]["geometry_local"])
-    tools.execute("transform_object", {"object_id": "data_center_1", "operation": "move", "delta_x_m": 0, "delta_y_m": 200, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None})
-    tools.execute("transform_object", {"object_id": "data_center_1", "operation": "resize", "delta_x_m": None, "delta_y_m": None, "width_m": 300, "length_m": 400, "height_m": None, "rotation_deg": None, "capacity_mw": None})
-    tools.execute("transform_object", {"object_id": "data_center_1", "operation": "rotate", "delta_x_m": None, "delta_y_m": None, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": 45, "capacity_mw": None})
-    tools.execute("transform_object", {"object_id": "data_center_1", "operation": "set_capacity", "delta_x_m": None, "delta_y_m": None, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": 150})
+    tools.execute("transform_object", {"object_id": "bess_1", "operation": "move", "delta_x_m": 0, "delta_y_m": 200, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None})
+    tools.execute("transform_object", {"object_id": "bess_1", "operation": "resize", "delta_x_m": None, "delta_y_m": None, "width_m": 300, "length_m": 400, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None})
+    tools.execute("transform_object", {"object_id": "bess_1", "operation": "rotate", "delta_x_m": None, "delta_y_m": None, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": 45, "power_mw": None, "energy_mwh": None, "duration_hours": None})
+    tools.execute("transform_object", {"object_id": "bess_1", "operation": "set_storage_capacity", "delta_x_m": None, "delta_y_m": None, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": 150, "energy_mwh": 600, "duration_hours": 4})
 
     geometry = tools.session.scene_state["proposed"][0]["geometry_local"]
     assert geometry["center_xy_m"][1] == original["center_xy_m"][1] + 200
     assert (geometry["width_m"], geometry["length_m"], geometry["rotation_deg"]) == (300, 400, 45)
-    campus = tools.session.scene_state["proposed"][0]
-    assert campus["attributes"]["capacity_mw"] == 150
-    halls = [item for item in campus["components"] if item["kind"] == "data_hall"]
-    assert sum(item["attributes"]["capacity_mw"] for item in halls) == 150
-    assert next(item for item in campus["components"] if item["kind"] == "expansion_reserve")["attributes"]["capacity_mw"] == 150
+    facility = tools.session.scene_state["proposed"][0]
+    assert facility["attributes"]["power_mw"] == 150
+    assert facility["attributes"]["energy_mwh"] == 600
+    enclosures = [item for item in facility["components"] if item["kind"] == "battery_enclosure"]
+    assert sum(item["attributes"]["power_mw"] for item in enclosures) == 150
+    assert sum(item["attributes"]["energy_mwh"] for item in enclosures) == 600
+    assert next(item for item in facility["components"] if item["kind"] == "expansion_reserve")["attributes"]["power_mw"] == 150
 
 
-def test_component_move_is_validated_inside_campus_envelope():
+def test_component_move_is_validated_inside_facility_envelope():
     _site, tools = executor()
-    campus = tools.session.scene_state["proposed"][0]
-    original = copy.deepcopy(next(item for item in campus["components"] if item["id"] == "electrical_yard")["geometry_relative"])
+    facility = tools.session.scene_state["proposed"][0]
+    original = copy.deepcopy(next(item for item in facility["components"] if item["id"] == "point_of_interconnection")["geometry_relative"])
 
     tools.execute("transform_object", {
-        "object_id": "electrical_yard", "operation": "move", "delta_x_m": 10, "delta_y_m": 0,
-        "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None,
+        "object_id": "point_of_interconnection", "operation": "move", "delta_x_m": 10, "delta_y_m": 0,
+        "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None,
     })
-    moved = next(item for item in tools.session.scene_state["proposed"][0]["components"] if item["id"] == "electrical_yard")
+    moved = next(item for item in tools.session.scene_state["proposed"][0]["components"] if item["id"] == "point_of_interconnection")
     assert moved["geometry_relative"]["center_uv"][0] > original["center_uv"][0]
 
-    with pytest.raises(ToolValidationError, match="leaves the campus planning envelope"):
+    with pytest.raises(ToolValidationError, match="leaves the facility planning envelope"):
         tools.execute("transform_object", {
-            "object_id": "electrical_yard", "operation": "move", "delta_x_m": 1000, "delta_y_m": 0,
-            "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None,
+            "object_id": "point_of_interconnection", "operation": "move", "delta_x_m": 1000, "delta_y_m": 0,
+            "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None,
         })
 
 
@@ -161,11 +163,11 @@ def test_evaluation_tool_returns_deterministic_authority_output():
 def test_observed_geometry_cannot_be_modified_and_arbitrary_geojson_is_rejected():
     site, tools = executor()
     observed_before = copy.deepcopy(site["geometry"])
-    tools.execute("transform_object", {"object_id": "data_center_1", "operation": "move", "delta_x_m": 1, "delta_y_m": 1, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None})
+    tools.execute("transform_object", {"object_id": "bess_1", "operation": "move", "delta_x_m": 1, "delta_y_m": 1, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None})
     assert site["geometry"] == observed_before
 
     with pytest.raises(ToolValidationError, match="Unexpected tool arguments"):
-        tools.execute("propose_data_center", {"capacity_mw": 100, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": None, "geometry": {"type": "Polygon"}})
+        tools.execute("propose_bess_facility", {"power_mw": 100, "energy_mwh": 400, "duration_hours": 4, "expansion_power_mw": 300, "expansion_energy_mwh": 1200, "width_m": None, "length_m": None, "height_m": None, "position": None, "rotation_deg": None, "minimum_setback_m": 10, "elements": None, "geometry": {"type": "Polygon"}})
 
 
 def test_unsupported_constraint_is_unresolved_and_malformed_tool_call_fails_safely():
@@ -181,7 +183,7 @@ def test_unsupported_constraint_is_unresolved_and_malformed_tool_call_fails_safe
 def test_invalid_tool_inputs_and_sequences_are_deterministic_without_mireye_access():
     site_one, tools_one = executor()
     site_two, tools_two = executor()
-    invalid = {"object_id": "data_center_1", "operation": "move", "delta_x_m": None, "delta_y_m": None, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None}
+    invalid = {"object_id": "bess_1", "operation": "move", "delta_x_m": None, "delta_y_m": None, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None}
     with pytest.raises(ToolValidationError, match="move requires"):
         tools_one.execute("transform_object", invalid)
 
@@ -201,7 +203,7 @@ def test_agent_exposes_phase6_evidence_constraints_without_fetch_tools():
 
     assert {"max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in"}.issubset(constraint_ids)
     assert "max_nwi_wetland_fraction_of_parcel" in context["available_constraints"]
-    assert "sufficient_grid_capacity" in context["unresolved_constraints"]
+    assert "bess_export_interconnection" in context["unresolved_constraints"]
 
 
 def test_alternative_layout_branch_updates_session_and_remains_comparable():
@@ -235,7 +237,7 @@ def test_alternative_layout_branch_updates_session_and_remains_comparable():
     model = ScriptedModel([
         call("get_site_context", {"snapshot_id": site["snapshot_id"]}),
         call("branch_scenario", {"scenario_id": "scenario-a", "user_intent": "Try a second layout."}),
-        call("transform_object", {"object_id": "data_center_1", "operation": "move", "delta_x_m": 10, "delta_y_m": 0, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "capacity_mw": None}),
+        call("transform_object", {"object_id": "bess_1", "operation": "move", "delta_x_m": 10, "delta_y_m": 0, "width_m": None, "length_m": None, "height_m": None, "rotation_deg": None, "power_mw": None, "energy_mwh": None, "duration_hours": None}),
         call("evaluate_scenario", {"requested_constraints": [{"constraint_id": "footprint_inside_parcel"}]}),
         ModelReply(message="Alternative created.", tool_calls=[], response_items=[]),
         call("get_site_context", {"snapshot_id": site["snapshot_id"]}),

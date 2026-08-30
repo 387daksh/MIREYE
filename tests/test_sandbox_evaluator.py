@@ -38,7 +38,7 @@ def scene(*, center=(0.0, 0.0), width=100.0, length=200.0, rotation=0.0):
         "frame": {"origin": {"lat": 0.0, "lng": 0.0}, "coordinate_frame_version": "local_tangent_plane_v1"},
         "observed": [],
         "proposed": [{
-            "id": "data_center_1",
+            "id": "bess_1",
             "geometry_local": {"shape": "oriented_rectangle", "center_xy_m": list(center), "width_m": width, "length_m": length, "height_m": 28.0, "rotation_deg": rotation},
             "attributes": {"capacity_mw": 100.0},
         }],
@@ -82,7 +82,7 @@ def test_valid_footprint_passes_containment_and_metrics_are_deterministic():
         {"constraint_id": "parcel_coverage", "max_percent": 20},
     ])
 
-    metrics = evaluation["derived_geometry_metrics"]["data_center_1"]
+    metrics = evaluation["derived_geometry_metrics"]["bess_1"]
     assert evaluation["overall_status"] == "PASS"
     assert metrics["footprint_area_m2"] == 20000.0
     assert 0 < metrics["parcel_coverage_percent"] < 20

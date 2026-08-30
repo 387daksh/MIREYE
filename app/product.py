@@ -12,6 +12,13 @@ class ProductRequestError(ValueError):
     pass
 
 
+BESS_PHASE_POWER_MW = 100.0
+BESS_DURATION_HOURS = 4.0
+BESS_PHASE_ENERGY_MWH = 400.0
+BESS_EXPANSION_POWER_MW = 300.0
+BESS_EXPANSION_ENERGY_MWH = 1200.0
+
+
 _STATES = {
     "alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut",
     "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "indiana", "iowa",
@@ -32,9 +39,13 @@ def compile_request(message: str) -> dict[str, Any]:
     acreage = re.search(r"(\d+(?:\.\d+)?)\s*(?:-|–|to)\s*(\d+(?:\.\d+)?)\s*acres?", lower)
     region = next((name.title() for name in _STATES if re.search(rf"\b{re.escape(name)}\b", lower)), None)
     project = next((label for key, label in (
-        ("data center", "Data center"), ("solar", "Solar project"),
+        ("battery energy storage", "Battery energy storage system"), ("battery storage", "Battery energy storage system"),
+        ("energy storage", "Battery energy storage system"),
+        ("bess", "Battery energy storage system"), ("solar", "Solar project"),
         ("industrial", "Industrial site"), ("diligence", "Property diligence"),
     ) if key in lower), "Site analysis")
+    if project == "Battery energy storage system":
+        capacity = BESS_PHASE_POWER_MW
 
     understanding = []
     if capacity is not None:
@@ -76,10 +87,14 @@ def compile_request(message: str) -> dict[str, Any]:
         constraints.append({"constraint_id": "industrial_zoning"})
         labels["industrial_zoning"] = "Zoning"
         understanding.append("Industrial zoning")
-    if "grid capacity" in lower or "sufficient grid" in lower:
-        constraints.append({"constraint_id": "sufficient_grid_capacity"})
-        labels["sufficient_grid_capacity"] = "Grid capacity"
-        understanding.append("Grid capacity")
+    if project == "Battery energy storage system" or "grid capacity" in lower or "sufficient grid" in lower:
+        constraints.append({"constraint_id": "bess_export_interconnection"})
+        labels["bess_export_interconnection"] = "Export / injection interconnection"
+        understanding.append("Export / injection interconnection")
+    if project == "Battery energy storage system":
+        constraints.append({"constraint_id": "energy_storage_entitlement"})
+        labels["energy_storage_entitlement"] = "Energy-storage permitted use"
+        understanding.append("Energy-storage entitlement")
 
     return {
         "message": text,
@@ -211,7 +226,9 @@ class ProductExperienceService:
     @staticmethod
     def _candidate(snapshot: dict, evaluation: dict | None, compiled: dict, world_id: str | None) -> dict:
         evidence = snapshot.get("evidence", {})
-        value = lambda name: (evidence.get(name) or {}).get("value")
+        def value(name: str) -> Any:
+            return (evidence.get(name) or {}).get("value")
+
         area_m2 = value("parcel_area_m2")
         outcomes = {item["constraint_id"]: item for item in (evaluation or {}).get("constraint_results", [])}
         checks = []

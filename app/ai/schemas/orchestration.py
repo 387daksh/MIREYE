@@ -12,7 +12,7 @@ class StrictModel(BaseModel):
 
 
 class ProjectType(str, Enum):
-    DATA_CENTER = "DATA_CENTER"
+    BESS = "BESS"
     SOLAR = "SOLAR"
     INDUSTRIAL = "INDUSTRIAL"
     LOGISTICS = "LOGISTICS"

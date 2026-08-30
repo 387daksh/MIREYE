@@ -77,8 +77,8 @@ async def main(project_id: str, snapshot_id: str) -> None:
     test_t2 = temporal_fixture_from_t1(snapshot, changed_field, before + 1)
     intelligence = project["project_intelligence"]
     actions = intelligence.get("recommended_actions") or []
-    power = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "sufficient_grid_capacity")
-    entitlement = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "data_center_entitlement")
+    power = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "bess_export_interconnection")
+    entitlement = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "energy_storage_entitlement")
     cases = [
         ("site identity", ["parcel_id", "parcel_address", "parcel_match_type"], "SUPPORTED", "CURRENT"),
         ("parcel scale", ["parcel_area_m2"], "SUPPORTED", "CURRENT"),

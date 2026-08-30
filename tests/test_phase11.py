@@ -50,13 +50,13 @@ def test_phase11_catalog_plan_is_relevant_deduplicated_freshness_aware_and_offli
     quote_count, fetch_count = len(client.quote_calls), len(client.fetch_calls)
 
     plan = run(service.catalog_evidence_plan(
-        project_type="Data center",
+        project_type="Battery energy storage system",
         requirements=[
-            {"constraint_id": "sufficient_grid_capacity"},
+            {"constraint_id": "bess_export_interconnection"},
             {"constraint_id": "resolution_point_outside_fema_sfha"},
             {"constraint_id": "water_capacity"},
         ],
-        unresolved_gaps=[{"requirement_id": "sufficient_grid_capacity"}],
+        unresolved_gaps=[{"requirement_id": "bess_export_interconnection"}],
         requested_decision="site_diligence",
         snapshot_id=snapshot["snapshot_id"],
     ))
@@ -93,7 +93,7 @@ def test_phase11_semantic_strength_never_upgrades_signals_or_missing_values():
     assert normalized["parcel_zoning"]["semantic_strength"] == "DIRECTLY_VERIFIED"
     assert normalized["within_floodplain_polygon"]["semantic_class"] == "POINT_SCOPED_SIGNAL"
     assert normalized["nearest_osm_transmission_line_distance_m"]["semantic_strength"] == "SOURCE_BACKED_SIGNAL"
-    assert "do not prove available or deliverable capacity" in normalized["nearest_osm_transmission_line_distance_m"]["claim_limits"][0]
+    assert "do not prove export or injection interconnection capability" in normalized["nearest_osm_transmission_line_distance_m"]["claim_limits"][0]
     assert normalized["transmission_redundancy_flag"]["semantic_strength"] == "DERIVED"
     assert normalized["water_system_name"]["semantic_strength"] == "INSUFFICIENT_EVIDENCE"
 
@@ -118,18 +118,18 @@ def test_phase11_project_intelligence_keeps_water_fiber_and_grid_as_partial_sign
     service = DiligenceService(store, SiteSnapshotService(store, client), FakeWorlds())
     project = _phase10_enrich(
         service,
-        "Evaluate a 100 MW data center, 20-50 acres, with sufficient grid capacity, water capacity, and fiber diversity. Use reasonable assumptions.",
+        "Evaluate a 100 MW / 400 MWh BESS, 20-50 acres, with sufficient grid capacity, water capacity, and fiber diversity. Use reasonable assumptions.",
         "ws-phase11-project",
     )
     coverage = {item["requirement_id"]: item for item in project["project_intelligence"]["evidence_coverage"]}
 
-    for requirement_id in ("sufficient_grid_capacity", "water_capacity", "fiber_diversity"):
+    for requirement_id in ("bess_export_interconnection", "water_capacity", "fiber_diversity"):
         assert coverage[requirement_id]["status"] == "UNRESOLVED"
         assert coverage[requirement_id]["semantic_strength"] == "UNSUPPORTED_SEMANTICS"
         assert coverage[requirement_id]["missing_evidence"]
     assert coverage["water_capacity"]["evidence_available"] is True
     assert "provider_confirmed_water_capacity" in coverage["water_capacity"]["missing_evidence"]
-    assert "utility_confirmed_deliverable_capacity_mw" in coverage["sufficient_grid_capacity"]["missing_evidence"]
+    assert "utility_or_iso_confirmed_export_injection_capacity_mw" in coverage["bess_export_interconnection"]["missing_evidence"]
     assert any(gap["requirement_id"] == "fiber_diversity" for gap in project["project_intelligence"]["evidence_gaps"])
 
 

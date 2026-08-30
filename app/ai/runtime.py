@@ -352,7 +352,7 @@ class OrchestrationEngine:
             assumptions_permitted=bool(context.get("assumptions_permitted")),
             request={
                 key: copy.deepcopy(context.get("request", {}).get(key))
-                for key in ("message", "project", "capacity_mw", "power_requirements", "constraints", "requirement_gaps")
+                for key in ("message", "project", "capacity_mw", "storage_requirements", "constraints", "requirement_gaps")
                 if key in context.get("request", {})
             },
             evidence_coverage=[

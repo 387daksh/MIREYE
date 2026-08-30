@@ -1,12 +1,12 @@
 """Deterministic parcel-derived placement for conceptual sandbox proposals.
 
-Strategy ``parcel_inset_campus_v2``:
+Strategy ``parcel_inset_bess_v1``:
 1. Project the authoritative parcel into the scene's local-meter frame.
 2. Inset it by the requested minimum setback.
 3. Try the requested rotation, or deterministic parcel-aligned orientations.
 4. Test central points followed by a stable 21x21 grid.
-5. If dimensions were omitted, uniformly scale the deterministic 300 MW
-   planning envelope from 100% to 25%; explicit dimensions are never reduced.
+5. If dimensions were omitted, uniformly scale the conceptual BESS planning
+   envelope from 100% to 25%; explicit dimensions are never reduced.
 6. Accept a candidate only after the unchanged deterministic evaluator passes
    containment and setback.
 """
@@ -18,7 +18,7 @@ from typing import Any
 
 from shapely.geometry import MultiPolygon, Polygon
 
-from app.sandbox import SandboxError, conceptual_data_center_campus
+from app.sandbox import SandboxError, conceptual_bess_facility
 from app.sandbox_evaluator import (
     SceneValidationError,
     _geometry_evidence_issue,
@@ -28,13 +28,15 @@ from app.sandbox_evaluator import (
 )
 
 
-PLACEMENT_STRATEGY = "parcel_inset_campus_v2"
-DEFAULT_EXPANSION_TARGET_MW = 300.0
-DEFAULT_LAND_ENVELOPE_M2_PER_MW = 750.0
-DEFAULT_CAMPUS_ASPECT_RATIO = 4 / 3
-DEFAULT_WIDTH_M = round(math.sqrt(DEFAULT_EXPANSION_TARGET_MW * DEFAULT_LAND_ENVELOPE_M2_PER_MW / DEFAULT_CAMPUS_ASPECT_RATIO), 3)
-DEFAULT_LENGTH_M = round(DEFAULT_WIDTH_M * DEFAULT_CAMPUS_ASPECT_RATIO, 3)
-DEFAULT_HEIGHT_M = 24.0
+PLACEMENT_STRATEGY = "parcel_inset_bess_v1"
+DEFAULT_PHASE_POWER_MW = 100.0
+DEFAULT_PHASE_ENERGY_MWH = 400.0
+DEFAULT_DURATION_HOURS = 4.0
+DEFAULT_EXPANSION_POWER_MW = 300.0
+DEFAULT_EXPANSION_ENERGY_MWH = 1200.0
+DEFAULT_WIDTH_M = 410.792
+DEFAULT_LENGTH_M = 547.723
+DEFAULT_HEIGHT_M = 4.0
 DEFAULT_MINIMUM_SETBACK_M = 10.0
 MINIMUM_DEFAULT_SCALE = 0.25
 GRID_STEPS = 20
@@ -103,11 +105,15 @@ def _scales(dimensions_explicit: bool) -> list[float]:
     return [round(1.0 - index * 0.05, 2) for index in range(steps + 1)]
 
 
-def generate_data_center_proposal(
+def generate_bess_proposal(
     snapshot: dict,
     scene_state: dict,
     *,
-    capacity_mw: Any,
+    power_mw: Any,
+    energy_mwh: Any,
+    duration_hours: Any,
+    expansion_power_mw: Any = DEFAULT_EXPANSION_POWER_MW,
+    expansion_energy_mwh: Any = DEFAULT_EXPANSION_ENERGY_MWH,
     width_m: Any = None,
     length_m: Any = None,
     height_m: Any = None,
@@ -121,7 +127,13 @@ def generate_data_center_proposal(
     if evidence_issue:
         return {"status": "UNRESOLVED", "strategy": PLACEMENT_STRATEGY, "reason": evidence_issue}
 
-    capacity = _number(capacity_mw, "capacity_mw", positive=True)
+    power = _number(power_mw, "power_mw", positive=True)
+    energy = _number(energy_mwh, "energy_mwh", positive=True)
+    duration = _number(duration_hours, "duration_hours", positive=True)
+    expansion_power = _number(expansion_power_mw, "expansion_power_mw", positive=True)
+    expansion_energy = _number(expansion_energy_mwh, "expansion_energy_mwh", positive=True)
+    if not math.isclose(energy, power * duration) or not math.isclose(expansion_energy, expansion_power * duration):
+        raise SceneValidationError("BESS energy_mwh must equal power_mw multiplied by duration_hours for both phases.")
     width = _number(width_m if width_m is not None else DEFAULT_WIDTH_M, "width_m", positive=True)
     length = _number(length_m if length_m is not None else DEFAULT_LENGTH_M, "length_m", positive=True)
     height = _number(height_m if height_m is not None else DEFAULT_HEIGHT_M, "height_m", positive=True)
@@ -153,14 +165,17 @@ def generate_data_center_proposal(
         for angle in _orientations(feasible_region, rotation):
             for center in centers:
                 try:
-                    candidate = conceptual_data_center_campus(
+                    candidate = conceptual_bess_facility(
                         center_xy_m=center,
                         width_m=placed_width,
                         length_m=placed_length,
                         height_m=height,
                         rotation_deg=angle,
-                        capacity_mw=capacity,
-                        expansion_target_mw=max(DEFAULT_EXPANSION_TARGET_MW, capacity),
+                        power_mw=power,
+                        energy_mwh=energy,
+                        duration_hours=duration,
+                        expansion_power_mw=expansion_power,
+                        expansion_energy_mwh=expansion_energy,
                         elements=elements,
                     )
                 except SandboxError as exc:

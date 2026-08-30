@@ -54,7 +54,8 @@ SITE_SNAPSHOT_FIELDS = (
     "sewer_service_area_provider",
 )
 
-DATA_CENTER_SITING_PRESET = "data_center_siting"
+# The provider currently exposes this preset name; MIREYE evidence selection stays unchanged.
+BESS_SITING_PRESET = "data_center_siting"
 MIREYE_EXPLICIT_FIELD_LIMIT = 50
 PROJECT_EVIDENCE_FIELDS = {
     "identity": (
@@ -110,10 +111,10 @@ PROJECT_EVIDENCE_FIELDS = {
         "political_region", "political_county", "political_locality", "tract_geoid",
     ),
 }
-DATA_CENTER_CONTEXT_FIELDS = tuple(dict.fromkeys(
+BESS_CONTEXT_FIELDS = tuple(dict.fromkeys(
     field for fields in PROJECT_EVIDENCE_FIELDS.values() for field in fields
 ))
-DATA_CENTER_EVIDENCE_DOMAINS = tuple(PROJECT_EVIDENCE_FIELDS)
+BESS_EVIDENCE_DOMAINS = tuple(PROJECT_EVIDENCE_FIELDS)
 REQUIREMENT_EVIDENCE_DOMAINS = {
     "parcel_acreage_range": ("identity",), "land_size_context": ("identity",),
     "resolution_point_outside_fema_sfha": ("environment",), "parcel_outside_fema_sfha": ("environment",),
@@ -122,10 +123,10 @@ REQUIREMENT_EVIDENCE_DOMAINS = {
     "max_resolution_point_slope_degrees": ("terrain",), "max_slope_degrees": ("terrain",),
     "terrain_context": ("terrain",), "max_resolution_point_substation_distance_m": ("grid",),
     "max_resolution_point_transmission_distance_m": ("grid",), "transmission_proximity": ("grid",),
-    "sufficient_grid_capacity": ("grid",), "max_resolution_point_major_road_distance_m": ("access_utilities",),
+    "bess_export_interconnection": ("grid",), "max_resolution_point_major_road_distance_m": ("access_utilities",),
     "road_proximity": ("access_utilities",), "legal_access": ("access_utilities",),
     "parcel_zoning_code_in": ("identity",), "industrial_zoning": ("identity",), "zoning_context": ("identity",),
-    "data_center_entitlement": ("identity", "site_context"),
+    "energy_storage_entitlement": ("identity", "site_context"),
     "water_capacity": ("access_utilities",), "fiber_diversity": ("access_utilities",),
 }
 DOMAIN_IMPACT = {
@@ -214,18 +215,21 @@ def _local_xy(lat: float, lng: float, origin: dict[str, float]) -> list[float]:
     return [round(x, 3), round(y, 3)]
 
 
-def conceptual_data_center_campus(
+def conceptual_bess_facility(
     *,
     center_xy_m: list[float],
     width_m: float,
     length_m: float,
     height_m: float,
     rotation_deg: float,
-    capacity_mw: float,
-    expansion_target_mw: float = 300.0,
+    power_mw: float,
+    energy_mwh: float,
+    duration_hours: float,
+    expansion_power_mw: float = 300.0,
+    expansion_energy_mwh: float = 1200.0,
     elements: list[str] | None = None,
 ) -> dict:
-    """Return the deterministic, conceptual campus representation used by the sandbox."""
+    """Return deterministic conceptual BESS massing used by the sandbox."""
 
     def component(
         component_id: str,
@@ -238,11 +242,14 @@ def conceptual_data_center_campus(
         component_height_m: float,
         render_class: str,
         phase: str,
-        component_capacity_mw: float | None = None,
+        component_power_mw: float | None = None,
+        component_energy_mwh: float | None = None,
     ) -> dict:
         attributes = {"phase": phase}
-        if component_capacity_mw is not None:
-            attributes["capacity_mw"] = round(component_capacity_mw, 3)
+        if component_power_mw is not None:
+            attributes["power_mw"] = round(component_power_mw, 3)
+        if component_energy_mwh is not None:
+            attributes["energy_mwh"] = round(component_energy_mwh, 3)
         return {
             "id": component_id,
             "kind": kind,
@@ -261,37 +268,40 @@ def conceptual_data_center_campus(
             "attributes": attributes,
         }
 
-    phase_capacity = min(float(capacity_mw), float(expansion_target_mw))
-    expansion_capacity = max(0.0, float(expansion_target_mw) - phase_capacity)
+    phase_power = min(float(power_mw), float(expansion_power_mw))
+    phase_energy = min(float(energy_mwh), float(expansion_energy_mwh))
+    expansion_power = max(0.0, float(expansion_power_mw) - phase_power)
+    expansion_energy = max(0.0, float(expansion_energy_mwh) - phase_energy)
     components = [
-        component("data_hall_a", "data_hall", "Data hall A", center_uv=(-0.27, -0.08), width_ratio=0.22, length_ratio=0.42, component_height_m=height_m, render_class="building", phase="PHASE_1", component_capacity_mw=phase_capacity / 2),
-        component("data_hall_b", "data_hall", "Data hall B", center_uv=(-0.02, -0.08), width_ratio=0.22, length_ratio=0.42, component_height_m=height_m, render_class="building", phase="PHASE_1", component_capacity_mw=phase_capacity / 2),
-        component("electrical_yard", "electrical_area", "Electrical yard", center_uv=(-0.27, -0.36), width_ratio=0.22, length_ratio=0.10, component_height_m=6.0, render_class="utility", phase="PHASE_1"),
-        component("cooling_plant", "cooling_plant", "Cooling plant", center_uv=(0.18, -0.08), width_ratio=0.10, length_ratio=0.42, component_height_m=10.0, render_class="utility", phase="PHASE_1"),
-        component("service_parking", "service_parking", "Parking and service", center_uv=(-0.12, 0.25), width_ratio=0.34, length_ratio=0.16, component_height_m=0.4, render_class="surface", phase="PHASE_1"),
+        component("battery_enclosure_a", "battery_enclosure", "Battery enclosure block A", center_uv=(-0.27, -0.08), width_ratio=0.22, length_ratio=0.42, component_height_m=height_m, render_class="building", phase="PHASE_1", component_power_mw=phase_power / 2, component_energy_mwh=phase_energy / 2),
+        component("battery_enclosure_b", "battery_enclosure", "Battery enclosure block B", center_uv=(-0.02, -0.08), width_ratio=0.22, length_ratio=0.42, component_height_m=height_m, render_class="building", phase="PHASE_1", component_power_mw=phase_power / 2, component_energy_mwh=phase_energy / 2),
+        component("inverter_pcs_a", "inverter_pcs", "Inverter / PCS block A", center_uv=(0.18, -0.20), width_ratio=0.10, length_ratio=0.15, component_height_m=3.0, render_class="utility", phase="PHASE_1", component_power_mw=phase_power / 2),
+        component("inverter_pcs_b", "inverter_pcs", "Inverter / PCS block B", center_uv=(0.18, 0.00), width_ratio=0.10, length_ratio=0.15, component_height_m=3.0, render_class="utility", phase="PHASE_1", component_power_mw=phase_power / 2),
+        component("point_of_interconnection", "point_of_interconnection", "Point of interconnection", center_uv=(-0.27, -0.36), width_ratio=0.22, length_ratio=0.10, component_height_m=6.0, render_class="utility", phase="PHASE_1"),
+        component("service_area", "service_area", "Service area", center_uv=(-0.12, 0.25), width_ratio=0.34, length_ratio=0.16, component_height_m=0.4, render_class="surface", phase="PHASE_1"),
         component("internal_access", "internal_access_road", "Internal access road", center_uv=(-0.46, 0.0), width_ratio=0.035, length_ratio=0.86, component_height_m=0.2, render_class="access", phase="PHASE_1"),
-        component("expansion_reserve", "expansion_reserve", "Expansion reserve", center_uv=(0.36, 0.0), width_ratio=0.20, length_ratio=0.72, component_height_m=0.2, render_class="reserve", phase="FUTURE", component_capacity_mw=expansion_capacity),
+        component("expansion_reserve", "expansion_reserve", "Expansion reserve", center_uv=(0.36, 0.0), width_ratio=0.20, length_ratio=0.72, component_height_m=0.2, render_class="reserve", phase="FUTURE", component_power_mw=expansion_power, component_energy_mwh=expansion_energy),
     ]
     element_kinds = {
-        "data_halls": {"data_hall"},
-        "electrical_area": {"electrical_area"},
-        "cooling_plant": {"cooling_plant"},
+        "battery_enclosures": {"battery_enclosure"},
+        "inverter_pcs": {"inverter_pcs"},
+        "point_of_interconnection": {"point_of_interconnection"},
         "internal_access": {"internal_access_road"},
-        "service_parking": {"service_parking"},
+        "service_area": {"service_area"},
         "expansion_reserve": {"expansion_reserve"},
     }
     selected = list(element_kinds) if elements is None else list(dict.fromkeys(elements))
     invalid = set(selected) - set(element_kinds)
     if invalid or not selected:
-        raise SandboxError(f"Unsupported conceptual campus elements: {', '.join(sorted(invalid)) or 'none'}.")
+        raise SandboxError(f"Unsupported conceptual BESS elements: {', '.join(sorted(invalid)) or 'none'}.")
     selected_kinds = set().union(*(element_kinds[name] for name in selected))
     components = [item for item in components if item["kind"] in selected_kinds]
     return {
-        "id": "data_center_1",
-        "kind": "data_center_campus",
+        "id": "bess_1",
+        "kind": "bess_facility",
         "origin": "PROPOSED",
-        "semantic_class": "proposed_data_center_campus",
-        "render_class": "campus_boundary",
+        "semantic_class": "proposed_bess_facility",
+        "render_class": "facility_boundary",
         "geometry_local": {
             "shape": "oriented_rectangle",
             "center_xy_m": [round(float(center_xy_m[0]), 3), round(float(center_xy_m[1]), 3)],
@@ -301,21 +311,25 @@ def conceptual_data_center_campus(
             "rotation_deg": round(float(rotation_deg), 6),
         },
         "attributes": {
-            "capacity_mw": round(float(capacity_mw), 3),
+            "capacity_mw": round(float(power_mw), 3),
+            "power_mw": round(float(power_mw), 3),
+            "energy_mwh": round(float(energy_mwh), 3),
+            "duration_hours": round(float(duration_hours), 3),
             "phase": "PHASE_1",
-            "expansion_target_mw": round(float(expansion_target_mw), 3),
-            "layout_strategy": "balanced_campus",
+            "expansion_power_mw": round(float(expansion_power_mw), 3),
+            "expansion_energy_mwh": round(float(expansion_energy_mwh), 3),
+            "layout_strategy": "bess_block_massing",
             "planning_basis": "conceptual_land_envelope_only",
             "selected_elements": selected,
         },
         "components": components,
-        "assumption_profile": "conceptual_ai_data_center_campus_v1",
+        "assumption_profile": "conceptual_bess_100mw_400mwh_v1",
     }
 
 
-def campus_component_object(campus: dict, component: dict) -> dict:
-    """Materialize one relative campus component in the local-meter frame."""
-    parent = campus["geometry_local"]
+def facility_component_object(facility: dict, component: dict) -> dict:
+    """Materialize one relative facility component in the local-meter frame."""
+    parent = facility["geometry_local"]
     relative = component["geometry_relative"]
     radians = math.radians(float(parent["rotation_deg"]))
     x = float(relative["center_uv"][0]) * float(parent["width_m"])
@@ -333,7 +347,10 @@ def campus_component_object(campus: dict, component: dict) -> dict:
             "height_m": float(relative["height_m"]),
             "rotation_deg": float(parent["rotation_deg"]) + float(relative.get("rotation_offset_deg", 0)),
         },
-        "attributes": {"capacity_mw": max(1.0, float(component.get("attributes", {}).get("capacity_mw", 1.0)))},
+        "attributes": {
+            **copy.deepcopy(component.get("attributes", {})),
+            "capacity_mw": max(1.0, float(component.get("attributes", {}).get("power_mw", 1.0))),
+        },
     }
 
 
@@ -390,13 +407,15 @@ def scene_state_from_snapshot(snapshot: dict) -> dict:
                 "representation": "CONCEPTUAL_FLAT",
             },
         ],
-        "proposed": [conceptual_data_center_campus(
+        "proposed": [conceptual_bess_facility(
             center_xy_m=_local_xy(centroid.y, centroid.x, origin),
             width_m=410.792,
             length_m=547.723,
-            height_m=24.0,
+            height_m=4.0,
             rotation_deg=0.0,
-            capacity_mw=100.0,
+            power_mw=100.0,
+            energy_mwh=400.0,
+            duration_hours=4.0,
         )],
         "render_contract": {
             "version": "semantic_scene_v1",
@@ -478,9 +497,9 @@ def _field_semantics(name: str, record: dict, metadata: dict) -> dict:
         strength, semantic_class = "SOURCE_BACKED_SIGNAL", "PROXIMITY_OR_CONTEXT_SIGNAL"
     limits = []
     if name.startswith("nearest_") or "within_radius" in name or name in {"transmission_redundancy_flag", "interconnection_queue_active_capacity_county_mw"}:
-        limits.append("Infrastructure proximity, voltage, counts, queue totals, and redundancy signals do not prove available or deliverable capacity.")
+        limits.append("Infrastructure proximity, voltage, counts, queue totals, and redundancy signals do not prove export or injection interconnection capability.")
     if name == "parcel_zoning":
-        limits.append("A raw zoning value does not establish permitted data-center use or entitlement.")
+        limits.append("A raw zoning value does not establish permitted energy-storage use or entitlement.")
     if name in {"within_floodplain_polygon", "fema_flood_zone"}:
         limits.append("This point-scoped FEMA evidence does not prove whole-parcel or footprint flood exclusion.")
     if name == "slope_degrees":
@@ -889,8 +908,8 @@ class SiteSnapshotService:
         except httpx.HTTPError as exc:
             raise MireyeUnavailableError("MIREYE field catalog is temporarily unavailable.") from exc
         presets = catalog.get("presets") or {}
-        is_data_center = "data center" in str(project_type).casefold()
-        selected_profile = profile or (DATA_CENTER_SITING_PRESET if is_data_center else None)
+        is_bess = any(value in str(project_type).casefold() for value in ("battery energy storage", "energy storage", "bess"))
+        selected_profile = profile or (BESS_SITING_PRESET if is_bess else None)
         preset_fields = presets.get(selected_profile, []) if selected_profile else []
         if require_profile and (not isinstance(preset_fields, list) or not preset_fields):
             raise FieldCatalogError(f"Current MIREYE catalog lacks the {profile} preset.")
@@ -899,8 +918,8 @@ class SiteSnapshotService:
             if isinstance(item, dict) and item.get("name")
         }
         requirement_ids = [item.get("constraint_id") for item in requirements or [] if item.get("constraint_id")]
-        broad_diligence = is_data_center and requested_decision in {"candidate_screening", "site_diligence", "project_readiness"}
-        domains = list(DATA_CENTER_EVIDENCE_DOMAINS if broad_diligence else ("identity",))
+        broad_diligence = is_bess and requested_decision in {"candidate_screening", "site_diligence", "project_readiness"}
+        domains = list(BESS_EVIDENCE_DOMAINS if broad_diligence else ("identity",))
         for requirement_id in requirement_ids:
             domains.extend(REQUIREMENT_EVIDENCE_DOMAINS.get(requirement_id, ()))
         domains = list(dict.fromkeys(domains))
@@ -928,7 +947,7 @@ class SiteSnapshotService:
             planned_semantics = _field_semantics(name, {"status": "ok", "value": "planned"}, field_metadata)
             field_manifest.append({
                 "field": name,
-                "reason": f"Supports {', '.join(field_domains).replace('_', ' ') or 'data-center site'} evidence for {requested_decision.replace('_', ' ')}.",
+                "reason": f"Supports {', '.join(field_domains).replace('_', ' ') or 'BESS site'} evidence for {requested_decision.replace('_', ' ')}.",
                 "requirement_ids": affected,
                 "decision_impact": max((DOMAIN_IMPACT[domain] for domain in field_domains), default="MEDIUM", key=lambda value: ("LOW", "MEDIUM", "HIGH", "CRITICAL").index(value)),
                 "spatial_scope": _catalog_scope(name, field_metadata),
@@ -962,8 +981,8 @@ class SiteSnapshotService:
                 "reason": "Use the release-defined project preset when more than the explicit-field limit needs refresh; otherwise request only stale or missing fields.",
             },
             "known_gaps": [{
-                "requested_field": "site_deliverable_grid_capacity_mw",
-                "reason": "A 100 MW phase and 300 MW expansion require utility-confirmed deliverability.",
+                "requested_field": "utility_or_iso_confirmed_export_injection_capacity_mw",
+                "reason": "A 100 MW phase and 300 MW expansion require confirmed export or injection interconnection capability.",
                 "nearest_available_fields": [
                     "nearest_osm_transmission_transformer_rating_mva",
                     "interconnection_queue_active_capacity_county_mw",
@@ -972,8 +991,8 @@ class SiteSnapshotService:
                 "status": "NOT_PROVEN_BY_CURRENT_CATALOG",
                 "decision_blocking": True,
             }, {
-                "requested_field": "jurisdiction_aware_data_center_entitlement",
-                "reason": "Raw zoning does not establish permitted data-center use.",
+                "requested_field": "jurisdiction_aware_energy_storage_entitlement",
+                "reason": "Raw zoning does not establish permitted energy-storage use.",
                 "nearest_available_fields": ["parcel_zoning"], "status": "UNSUPPORTED_SEMANTICS", "decision_blocking": True,
             }, {
                 "requested_field": "recorded_legal_access",
@@ -994,10 +1013,10 @@ class SiteSnapshotService:
         }
 
     async def project_intelligence_plan(
-        self, snapshot_id: str, *, profile: str = DATA_CENTER_SITING_PRESET, now: float | None = None,
+        self, snapshot_id: str, *, profile: str = BESS_SITING_PRESET, now: float | None = None,
     ) -> dict:
         return await self.catalog_evidence_plan(
-            project_type="Data center", requested_decision="site_diligence", snapshot_id=snapshot_id,
+            project_type="Battery energy storage system", requested_decision="site_diligence", snapshot_id=snapshot_id,
             profile=profile, now=now, require_profile=True,
         )
 

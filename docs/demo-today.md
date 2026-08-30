@@ -40,16 +40,18 @@ Point to:
 
 Say:
 
-> MIREYE and the external source layers describe observed reality. Geometry calculations and PASS/FAIL outcomes are deterministic. The campus is only a proposed pre-development concept.
+> MIREYE and the external source layers describe observed reality. Geometry calculations and PASS/FAIL outcomes are deterministic. The BESS facility is only a proposed pre-development concept.
 
-Point out that land currently passes, while flood, grid, zoning, legal road access, water capacity, and expansion feasibility remain explicitly unresolved where the evidence cannot prove them.
+Point out that land currently passes, while flood, export/injection interconnection, energy-storage entitlement, legal road access, and expansion feasibility remain explicitly unresolved where the evidence cannot prove them.
+
+Identify the proposed battery-enclosure blocks, inverter/PCS blocks, point of interconnection, internal access, service area, and expansion reserve. These are conceptual massing only.
 
 ### 3. Ask the live agent to evaluate the current concept
 
 Type:
 
 ```text
-Does the current 100 MW phase-1 campus fit inside the parcel with the current setback? Explain only from deterministic evaluation.
+Does the current 100 MW / 400 MWh phase-1 BESS facility fit inside the parcel with the current setback? Explain only from deterministic evaluation.
 ```
 
 Expected behavior:
@@ -71,7 +73,7 @@ In `Design options`:
 3. Type:
 
 ```text
-Create an alternative 100 MW layout with more room reserved for future expansion, then evaluate whether it fits.
+Create an alternative 100 MW / 400 MWh BESS layout with more room reserved for the 300 MW / 1,200 MWh expansion target, then evaluate whether it fits.
 ```
 
 Expected behavior:
@@ -106,10 +108,10 @@ The explanation may narrate the deterministic comparison but must not invent a s
 Type:
 
 ```text
-Why is grid capacity unresolved even though transmission is nearby?
+Why is BESS export/injection interconnection unresolved even though transmission is nearby?
 ```
 
-Expected answer: proximity, voltage, status, and queue evidence are useful screening signals, but they do not prove utility-deliverable MW.
+Expected answer: proximity, voltage, status, and queue evidence are useful screening signals, but they do not prove site-specific export/injection capacity or an approved storage interconnection pathway.
 
 ## Closing line
 
@@ -117,11 +119,12 @@ Expected answer: proximity, voltage, status, and queue evidence are useful scree
 
 ## Do not claim
 
-- The parcel is approved for a data center.
-- Nearby transmission proves 100 MW or 300 MW deliverability.
+- The parcel is approved for energy-storage use.
+- Nearby transmission proves 100 MW or 300 MW export/injection interconnection capability.
 - Point FEMA or slope evidence proves the whole parcel or footprint.
 - Mapped roads prove legal access, frontage, or heavy-haul suitability.
-- Raw zoning proves industrial entitlement.
+- Raw zoning proves energy-storage permitted use or entitlement.
+- An approved generation/storage interconnection source is available; the pathway is currently `UNRESOLVED`.
 - Proposed massing is engineering or construction design.
 
 ## Fast recovery

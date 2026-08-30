@@ -63,10 +63,10 @@ def _project(tmp_path):
     project["project_intelligence"] = {
         "active_site": {"site_id": "site_robotic", "site_snapshot_id": "snapshot_t1", "title": "1032 Robotic Ave"},
         "evidence_items": [{"evidence_id": "tx_distance", "snapshot_id": "snapshot_t1", "source": "MIREYE", "scope": "POINT_TO_NEAREST_FEATURE", "semantic_strength": "SOURCE_BACKED_SIGNAL", "observed_at": time.time(), "evidence_hash": "sha256:tx"}],
-        "evidence_coverage": [{"requirement_id": "sufficient_grid_capacity", "title": "100 MW deliverability", "status": "UNRESOLVED", "semantic_strength": "UNSUPPORTED_SEMANTICS", "snapshot_id": "snapshot_t1", "evidence_ids": ["tx_distance"], "evidence_scope": "UTILITY_COMMITTED_CAPACITY", "last_evaluated_at": time.time()}],
-        "evidence_dependencies": [{"requirement_id": "sufficient_grid_capacity", "evidence_id": "tx_distance"}],
-        "evidence_gaps": [{"gap_id": "gap_power", "requirement_id": "sufficient_grid_capacity", "status": "OPEN", "missing_evidence": ["utility_confirmed_capacity_mw"]}],
-        "recommended_actions": [{"action_id": "action_rfi", "gap_id": "gap_power", "requirement_id": "sufficient_grid_capacity", "status": "PROPOSED"}],
+        "evidence_coverage": [{"requirement_id": "bess_export_interconnection", "title": "100 MW BESS export / injection interconnection", "status": "UNRESOLVED", "semantic_strength": "UNSUPPORTED_SEMANTICS", "snapshot_id": "snapshot_t1", "evidence_ids": ["tx_distance"], "evidence_scope": "UTILITY_OR_ISO_CONFIRMED_EXPORT_INJECTION", "last_evaluated_at": time.time()}],
+        "evidence_dependencies": [{"requirement_id": "bess_export_interconnection", "evidence_id": "tx_distance"}],
+        "evidence_gaps": [{"gap_id": "gap_power", "requirement_id": "bess_export_interconnection", "status": "OPEN", "missing_evidence": ["utility_or_iso_confirmed_export_injection_capacity_mw"]}],
+        "recommended_actions": [{"action_id": "action_rfi", "gap_id": "gap_power", "requirement_id": "bess_export_interconnection", "status": "PROPOSED"}],
     }
     project["decision_history"] = [{"decision_id": "decision_screen", "evidence_ids": ["tx_distance"], "status": "UNRESOLVED"}]
     store.save_diligence_project(project)
@@ -77,12 +77,12 @@ def test_claims_retain_evidence_scope_and_do_not_upgrade_signal(tmp_path):
     store, project = _project(tmp_path)
     graph = EvidenceGraphRetriever(store)
 
-    claims = graph.find_claims_for_requirement(project["project_id"], "sufficient_grid_capacity")
+    claims = graph.find_claims_for_requirement(project["project_id"], "bess_export_interconnection")
     evidence = graph.find_supporting_evidence(project["project_id"], claims[0]["claim_id"])
 
     assert claims[0]["status"] == "UNSUPPORTED"
     assert claims[0]["semantic_strength"] == "INTERPRETATION"
-    assert claims[0]["provenance"]["scope"] == "UTILITY_COMMITTED_CAPACITY"
+    assert claims[0]["provenance"]["scope"] == "UTILITY_OR_ISO_CONFIRMED_EXPORT_INJECTION"
     assert [item["evidence_id"] for item in evidence] == ["tx_distance"]
     assert graph.find_actions_resolving_gap(project["project_id"], "gap_power")[0]["action_id"] == "action_rfi"
 
@@ -165,8 +165,8 @@ def test_unverified_model_interpretation_cannot_become_durable_claim(tmp_path):
 
     with pytest.raises(ValueError, match="must be verified"):
         graph.graph.record_validated_claim(project["project_id"], {
-            "claim_text": "The site has committed 100 MW.", "normalized_subject": "sufficient_grid_capacity",
-            "predicate": "has_deliverability", "normalized_object": "PASS", "semantic_strength": "INTERPRETATION", "verification_status": "UNSUPPORTED",
+            "claim_text": "The site has confirmed 100 MW export/injection interconnection.", "normalized_subject": "bess_export_interconnection",
+            "predicate": "has_export_injection_interconnection", "normalized_object": "PASS", "semantic_strength": "INTERPRETATION", "verification_status": "UNSUPPORTED",
         })
 
 

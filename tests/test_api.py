@@ -107,7 +107,7 @@ def test_workspace_lifecycle(client):
 
 def test_memory_retrieval_enforces_project_workspace(client):
     project = diligence_service.create_project(
-        workspace_id="workspace-memory-api", message="Compare a 100 MW data center site.", candidates=["1032 Robotic Ave"]
+        workspace_id="workspace-memory-api", message="Compare a 100 MW / 400 MWh BESS site.", candidates=["1032 Robotic Ave"]
     )
     path = f"/v1/diligence/projects/{project['project_id']}/memory/search?query=power"
     denied = client.get(path, headers={"X-Mireye-Workspace-Id": "another-workspace"})

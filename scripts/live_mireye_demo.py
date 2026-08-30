@@ -108,7 +108,7 @@ async def run(address: str, report_path: Path | None = None) -> dict:
         from app.mireye_client import MireyeClient
         from app.sandbox import ConfirmationRequired, SiteSnapshotService, scene_state_from_snapshot
         from app.sandbox_agent import SandboxSession, SandboxToolExecutor
-        from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_data_center_proposal
+        from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_bess_proposal
         from app.sandbox_scenarios import ScenarioService
         from app.workspace.store import WorkspaceStore
 
@@ -212,11 +212,13 @@ async def run(address: str, report_path: Path | None = None) -> dict:
         }
 
         scene = scene_state_from_snapshot(snapshot_t1)
-        proposal = generate_data_center_proposal(
-            snapshot_t1, scene, capacity_mw=100, minimum_setback_m=DEFAULT_MINIMUM_SETBACK_M,
+        proposal = generate_bess_proposal(
+            snapshot_t1, scene, power_mw=100, energy_mwh=400, duration_hours=4,
+            expansion_power_mw=300, expansion_energy_mwh=1200,
+            minimum_setback_m=DEFAULT_MINIMUM_SETBACK_M,
         )
         if proposal["status"] not in {"PLACED", "ADJUSTED"}:
-            raise LiveIntegrationError(f"No deterministic 100 MW proposal could be placed: {proposal.get('reason')}")
+            raise LiveIntegrationError(f"No deterministic 100 MW / 400 MWh BESS proposal could be placed: {proposal.get('reason')}")
         refresh_field, refresh_constraint = _refresh_constraint(snapshot_t1)
         scenario = scenarios.create(
             snapshot_t1, workspace_id=WORKSPACE_ID, user_intent="Live integration scenario.",

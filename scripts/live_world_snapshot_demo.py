@@ -64,7 +64,7 @@ async def build(args) -> dict:
     scene["world_snapshot_id"] = world["world_snapshot_id"]
     scenario = scenario_service.create(
         snapshot, workspace_id=snapshot["workspace_id"],
-        user_intent="Grounded 100 MW phase-1 campus with a 300 MW expansion target on the pinned physical world.",
+        user_intent="Grounded 100 MW / 400 MWh phase-1 BESS with a 300 MW / 1,200 MWh expansion target on the pinned physical world.",
         scene_state=scene, model_id="deterministic_world_demo_bootstrap",
     )
     return {"snapshot": snapshot, "world": world, "scenario": scenario, "quote": provisioned["quote"]}

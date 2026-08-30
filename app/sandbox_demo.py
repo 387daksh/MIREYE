@@ -49,14 +49,18 @@ async def provision_demo(service, scenarios, *, address: str, confirmed: bool, c
     )
 
     from app.sandbox import scene_state_from_snapshot
-    from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_data_center_proposal
+    from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_bess_proposal
 
     scene = scene_state_from_snapshot(snapshot)
     scene["proposed"] = []
-    proposal = generate_data_center_proposal(
+    proposal = generate_bess_proposal(
         snapshot,
         scene,
-        capacity_mw=100,
+        power_mw=100,
+        energy_mwh=400,
+        duration_hours=4,
+        expansion_power_mw=300,
+        expansion_energy_mwh=1200,
         minimum_setback_m=DEFAULT_MINIMUM_SETBACK_M,
     )
     if proposal["status"] not in {"PLACED", "ADJUSTED"}:
@@ -65,7 +69,7 @@ async def provision_demo(service, scenarios, *, address: str, confirmed: bool, c
     scenario = scenarios.create(
         snapshot,
         workspace_id=DEMO_WORKSPACE_ID,
-        user_intent="Place a conceptual 100 MW phase-1 campus with a 300 MW expansion target and a 10 m minimum setback.",
+        user_intent="Place a conceptual 100 MW / 400 MWh BESS with a 300 MW / 1,200 MWh expansion target and a 10 m minimum setback.",
         scene_state=proposal["scene_state"],
         model_id="deterministic_demo_bootstrap",
     )

@@ -5,7 +5,7 @@
   const chatEndpoint = () => `/v1/sandbox/${encodeURIComponent(snapshotId())}/chat`;
   const scenarioEndpoint = () => `/v1/sandbox/${encodeURIComponent(snapshotId())}/scenarios`;
   const freshnessEndpoint = () => `/v1/sandbox/site/${encodeURIComponent(snapshotId())}/freshness`;
-  const refreshQuoteEndpoint = () => `/v1/sandbox/site/${encodeURIComponent(snapshotId())}/refresh/quote?profile=data_center_siting`;
+  const refreshQuoteEndpoint = () => `/v1/sandbox/site/${encodeURIComponent(snapshotId())}/refresh/quote?profile=bess_siting`;
   let sceneState;
   let snapshotData;
   let worldData = null;
@@ -76,9 +76,9 @@
   function proposedFeatures() {
     const features = [];
     sceneState.proposed.forEach((object) => {
-      const parentClass = object.components ? "campus_boundary" : (object.render_class || "building");
+      const parentClass = object.components ? "facility_boundary" : (object.render_class || "building");
       features.push(rectangleFeature(object.id, object.geometry_local, {
-        label: object.components ? "Campus planning envelope" : object.kind,
+        label: object.components ? "BESS planning envelope" : object.kind,
         kind: object.kind,
         render_class: parentClass,
         semantic_class: object.semantic_class || `proposed_${object.kind}`,
@@ -114,11 +114,11 @@
       ["Phase 1", `${Number(object.attributes.capacity_mw)} MW`],
       ["Expansion target", `${Number(object.attributes.expansion_target_mw || object.attributes.capacity_mw)} MW`],
       ["Planning envelope", `${Math.round(area).toLocaleString()} m²`],
-      ["Campus elements", String((object.components || []).length)],
+      ["Facility elements", String((object.components || []).length)],
     ] : [["Status", "No proposed design"]];
     renderFactsList(document.getElementById("designFacts"), facts);
     const components = object ? object.components || [] : [];
-    document.getElementById("campusElements").replaceChildren(...components.map((component) => {
+    document.getElementById("facilityElements").replaceChildren(...components.map((component) => {
       const item = document.createElement("li");
       const name = document.createElement("span");
       const phase = document.createElement("small");
@@ -136,7 +136,7 @@
     max_resolution_point_slope_degrees: "Slope at resolution point", max_resolution_point_substation_distance_m: "Substation proximity",
     max_resolution_point_transmission_distance_m: "Transmission proximity", max_resolution_point_major_road_distance_m: "Road proximity",
     parcel_zoning_code_in: "Raw zoning code", parcel_outside_fema_sfha: "Whole-parcel flood", industrial_zoning: "Industrial zoning",
-    sufficient_grid_capacity: "Grid capacity", legal_access: "Legal road access",
+    bess_export_interconnection: "BESS export / injection interconnection", energy_storage_entitlement: "Energy-storage permitted use", legal_access: "Legal road access",
   };
 
   function constraintName(id) {
@@ -192,7 +192,7 @@
     const object = sceneState && sceneState.proposed[0];
     const metrics = object && evaluation ? evaluation.derived_geometry_metrics[object.id] : null;
     const facts = [
-      ["Capacity", object ? `${Number(object.attributes.capacity_mw)} MW` : "No proposal"],
+      ["Storage", object ? `${Number(object.attributes.power_mw)} MW / ${Number(object.attributes.energy_mwh)} MWh / ${Number(object.attributes.duration_hours)} h` : "No proposal"],
       ["Land envelope", metrics ? `${Number(metrics.footprint_area_m2).toLocaleString()} m²` : object ? `${(Number(object.geometry_local.width_m) * Number(object.geometry_local.length_m)).toLocaleString()} m²` : "-"],
       ["Evaluation", evaluation ? evaluation.overall_status : "UNRESOLVED"],
     ];
@@ -206,7 +206,7 @@
     const evaluation = document.getElementById("chatEvaluation");
     response.textContent = result.message;
     const activity = {
-      get_site_context: "Reviewed the site", propose_data_center: "Created a conceptual campus", transform_object: "Updated the layout",
+      get_site_context: "Reviewed the site", propose_bess_facility: "Created a conceptual BESS facility", transform_object: "Updated the layout",
       evaluate_scenario: "Re-evaluated the site", get_evidence: "Reviewed MIREYE sources", remove_object: "Removed a proposed object",
       reset_proposals: "Reset proposed designs", check_evidence_freshness: "Checked MIREYE freshness",
       quote_mireye_refresh: "Prepared a refresh estimate", confirm_and_refresh_evidence: "Refreshed MIREYE intelligence",
@@ -435,14 +435,14 @@
         ...results.industrial_zoning,
         explanation: `${zoning ? `Raw parcel code: ${zoning}. ` : "Raw parcel code is unavailable. "}${results.industrial_zoning.explanation}`,
       }],
-      ["Grid", results.sufficient_grid_capacity],
+      ["Interconnection", results.bess_export_interconnection],
       ["Water", {
         ...results.utilities_available,
         explanation: `${water === null ? "Mapped water service-area evidence is unavailable. " : `Mapped service-area flag: ${water ? "yes" : "no"}. `}${results.utilities_available.explanation}`,
       }],
       ["Expansion", {
         outcome: "UNRESOLVED",
-        explanation: "The 300 MW reserve is conceptual geometry; future power, water, grading, and construction feasibility are not proven.",
+        explanation: "The 300 MW / 1,200 MWh reserve is conceptual geometry; future interconnection, entitlement, grading, and construction feasibility are not proven.",
       }],
     ];
     const container = document.getElementById("feasibilityCards");
@@ -468,7 +468,7 @@
       { constraint_id: "transmission_available_capacity_mw" },
       { constraint_id: "legal_access" },
       { constraint_id: "industrial_zoning" },
-      { constraint_id: "sufficient_grid_capacity" },
+      { constraint_id: "bess_export_interconnection" },
       { constraint_id: "utilities_available" },
     ];
     const response = await fetch(`/v1/sandbox/site/${encodeURIComponent(snapshotId())}/evaluate`, {
@@ -814,7 +814,7 @@
     });
     map.addLayer({
       id: "sandbox-proposed-outline", type: "line", source: "sandbox-proposed",
-      filter: ["in", ["get", "render_class"], ["literal", ["campus_boundary", "reserve"]]],
+      filter: ["in", ["get", "render_class"], ["literal", ["facility_boundary", "reserve"]]],
       paint: {
         "line-color": ["match", ["get", "render_class"], "reserve", "#607558", "#9a5a38"],
         "line-width": ["match", ["get", "render_class"], "reserve", 1.5, 2.2],

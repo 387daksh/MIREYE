@@ -36,11 +36,11 @@ class ProjectIntelligence(TypedDict):
 
 
 _SEMANTIC_PROOF_GAPS = {
-    "sufficient_grid_capacity": ["utility_confirmed_deliverable_capacity_mw", "utility_interconnection_path"],
+    "bess_export_interconnection": ["utility_or_iso_confirmed_export_injection_capacity_mw", "approved_bess_interconnection_path"],
     "substation_available_capacity_mw": ["utility_confirmed_available_capacity_mw"],
     "transmission_available_capacity_mw": ["utility_confirmed_available_capacity_mw"],
     "industrial_zoning": ["jurisdiction_aware_zoning_determination"],
-    "data_center_entitlement": ["jurisdiction_aware_data_center_permitted_use_determination"],
+    "energy_storage_entitlement": ["jurisdiction_aware_energy_storage_permitted_use_determination"],
     "legal_access": ["recorded_legal_access_or_access_opinion"],
     "parcel_outside_fema_sfha": ["parcel_wide_flood_geometry_or_study"],
     "footprint_outside_fema_sfha": ["footprint_level_flood_geometry_or_study"],
@@ -51,21 +51,21 @@ _SEMANTIC_PROOF_GAPS = {
 }
 
 _POLICIES = {
-    "sufficient_grid_capacity": {
-        "title": "100 MW deliverability", "domain": "Power", "impact": "CRITICAL", "blocking": True,
-        "action_type": "UTILITY_CAPACITY_INTERCONNECTION_RFI", "recipient_category": "Serving utility or interconnecting provider",
-        "responsible_party": "Utility/interconnection team", "resolution": ["Obtain written capacity and interconnection-path confirmation."],
+    "bess_export_interconnection": {
+        "title": "100 MW export / injection interconnection", "domain": "Power", "impact": "CRITICAL", "blocking": True,
+        "action_type": "BESS_EXPORT_INTERCONNECTION_RFI", "recipient_category": "Serving utility or ISO/RTO storage interconnection team",
+        "responsible_party": "Storage interconnection team", "resolution": ["Obtain written export/injection capability and point-of-interconnection pathway confirmation."],
         "disqualification_likelihood": "HIGH", "critical_milestone": True, "dependency_centrality": 1,
     },
     "industrial_zoning": {
-        "title": "Permitted data-center use", "domain": "Entitlement", "impact": "CRITICAL", "blocking": True,
+        "title": "Jurisdiction-aware zoning determination", "domain": "Entitlement", "impact": "CRITICAL", "blocking": True,
         "action_type": "ZONING_ENTITLEMENT_RFI", "recipient_category": "Local planning or zoning authority",
         "responsible_party": "Entitlement counsel or planning authority", "resolution": ["Obtain a jurisdiction-aware written zoning or entitlement determination."],
         "disqualification_likelihood": "HIGH", "critical_milestone": True,
     },
-    "data_center_entitlement": {
-        "title": "Permitted data-center use", "domain": "Entitlement", "impact": "CRITICAL", "blocking": True,
-        "action_type": "ZONING_ENTITLEMENT_RFI", "recipient_category": "Controlling planning or development authority",
+    "energy_storage_entitlement": {
+        "title": "Permitted energy-storage use", "domain": "Entitlement", "impact": "CRITICAL", "blocking": True,
+        "action_type": "ENERGY_STORAGE_ENTITLEMENT_RFI", "recipient_category": "Controlling planning or zoning authority",
         "responsible_party": "Entitlement counsel or controlling authority", "resolution": ["Obtain a jurisdiction-aware written permitted-use and approval-path determination."],
         "disqualification_likelihood": "HIGH", "critical_milestone": True,
     },
@@ -105,7 +105,7 @@ _IMPACT_SCORE = {"LOW": 10, "MEDIUM": 40, "HIGH": 70, "CRITICAL": 100}
 _DISQUALIFICATION_SCORE = {"UNKNOWN": 0, "LOW": 5, "MEDIUM": 15, "HIGH": 25}
 _SCOPE_ALIASES = {"POINT_TO_NEAREST_FEATURE": "NEAREST_FEATURE"}
 RFI_ACTION_TYPES = {
-    "UTILITY_CAPACITY_INTERCONNECTION_RFI", "ZONING_ENTITLEMENT_RFI", "WATER_CAPACITY_RFI",
+    "BESS_EXPORT_INTERCONNECTION_RFI", "ENERGY_STORAGE_ENTITLEMENT_RFI", "ZONING_ENTITLEMENT_RFI", "WATER_CAPACITY_RFI",
     "FIBER_DIVERSITY_RFI", "LEGAL_ACCESS_RFI",
 }
 
@@ -379,14 +379,14 @@ def build_project_intelligence(
             item["evidence_available"] = True
             item["coverage"] = "PARTIAL"
             item["semantic_strength"] = "UNSUPPORTED_SEMANTICS" if item["unsupported_semantics"] or item["missing_evidence"] else "SOURCE_BACKED_SIGNAL"
-    power_requirements = project.get("request", {}).get("power_requirements") or {}
+    storage_requirements = project.get("request", {}).get("storage_requirements") or {}
     for item in coverage:
-        if item["requirement_id"] == "sufficient_grid_capacity":
-            phase_mw = power_requirements.get("phase_1_mw") or project.get("request", {}).get("capacity_mw")
+        if item["requirement_id"] == "bess_export_interconnection":
+            phase_mw = storage_requirements.get("phase_1_power_mw")
             if isinstance(phase_mw, (int, float)):
-                item["title"] = f"{phase_mw:g} MW deliverability"
-            if isinstance(power_requirements.get("expansion_mw"), (int, float)):
-                item["missing_evidence"] = list(dict.fromkeys([*item["missing_evidence"], "utility_confirmed_expansion_capacity_mw"]))
+                item["title"] = f"{phase_mw:g} MW export / injection interconnection"
+            if isinstance(storage_requirements.get("expansion_power_mw"), (int, float)):
+                item["missing_evidence"] = list(dict.fromkeys([*item["missing_evidence"], "utility_or_iso_confirmed_expansion_export_injection_capacity_mw"]))
     gaps = [
         _gap_from_coverage(project, item, evaluated_at, previous, dependency_lookup)
         for item in coverage if not item["decision_provable"]

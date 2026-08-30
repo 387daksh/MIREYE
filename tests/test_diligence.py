@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 from app import main
 from app.diligence import CONSTRAINT_CAPABILITIES, CONSTRAINT_FIELDS, DiligenceError, DiligenceService, UserSuppliedCandidateProvider, compile_project_request
 from app.mireye_client import MireyeClient
-from app.sandbox import DATA_CENTER_CONTEXT_FIELDS, ConfirmationRequired, SITE_SNAPSHOT_FIELDS, SITE_SNAPSHOT_FIELD_SCOPES, SiteSnapshotService
+from app.sandbox import BESS_CONTEXT_FIELDS, ConfirmationRequired, SITE_SNAPSHOT_FIELDS, SITE_SNAPSHOT_FIELD_SCOPES, SiteSnapshotService
 from app.sandbox_agent import DILIGENCE_TOOL_DEFINITIONS, TOOL_DEFINITIONS, ModelReply, SandboxAgent
 from app.workspace.store import WorkspaceStore
 
@@ -102,7 +102,7 @@ def diligence(tmp_path):
 def create_project(service, candidates=None):
     return service.create_project(
         workspace_id="workspace-1",
-        message="Compare sites for a 100 MW data center, 20-50 acres, resolution point outside flood, within 2 km of transmission and within 1 km of road, with sufficient grid capacity.",
+        message="Compare sites for a 100 MW / 400 MWh BESS, 20-50 acres, resolution point outside flood, within 2 km of transmission and within 1 km of road, with sufficient grid capacity.",
         candidates=candidates or ["First Site", "Second Site"],
     )
 
@@ -137,7 +137,7 @@ def test_agent_tool_contracts_cover_project_and_existing_sandbox_workflow():
         "compare_candidates", "check_evidence_freshness", "quote_mireye_refresh",
         "confirm_and_refresh_evidence", "get_evidence", "ask_mireye_site", "build_world_snapshot",
     } <= project_tools
-    assert {"get_site_context", "propose_data_center", "transform_object", "optimize_layout", "evaluate_scenario", "branch_scenario", "compare_scenarios", "reset_proposals"} <= sandbox_tools
+    assert {"get_site_context", "propose_bess_facility", "transform_object", "optimize_layout", "evaluate_scenario", "branch_scenario", "compare_scenarios", "reset_proposals"} <= sandbox_tools
     assert project_tools.isdisjoint({"lookup", "fetch", "fetch_batch", "mireye_client"})
 
 
@@ -162,7 +162,7 @@ def test_constraint_compiler_preserves_supported_and_unresolved_semantics():
     unresolved = {item["constraint_id"] for item in compiled["unresolved_constraints"]}
 
     assert {"parcel_acreage_range", "resolution_point_outside_fema_sfha", "max_resolution_point_transmission_distance_m", "parcel_zoning_code_in"} <= supported
-    assert "sufficient_grid_capacity" in unresolved
+    assert "bess_export_interconnection" in unresolved
     zoning = next(item for item in compiled["constraints"] if item["constraint_id"] == "parcel_zoning_code_in")
     assert zoning["allowed_codes"] == ["I-2", "M-1"]
 
@@ -170,7 +170,7 @@ def test_constraint_compiler_preserves_supported_and_unresolved_semantics():
 def test_project_brief_plans_requested_context_without_inventing_thresholds(diligence):
     service, _client, _store = diligence
     message = (
-        "I am evaluating sites for a 100 MW AI data center in Texas. Compare these candidate properties "
+        "I am evaluating sites for a 100 MW / 400 MWh BESS in Texas. Compare these candidate properties "
         "on land size, flood exposure, wetlands, terrain, transmission proximity, road proximity, zoning, "
         "and any other relevant site intelligence available from MIREYE."
     )
@@ -192,7 +192,7 @@ def test_field_plan_is_constraint_driven_and_does_not_fetch_full_catalog(diligen
 
     assert {"parcel_id", "parcel_boundary_geojson", "parcel_area_m2", "within_floodplain_polygon", "nearest_transmission_line_distance_m", "nearest_major_road_distance_m"} <= set(plan["fields"])
     assert "fiber_provider_count" not in plan["fields"]
-    assert len(plan["fields"]) < len(DATA_CENTER_CONTEXT_FIELDS)
+    assert len(plan["fields"]) < len(BESS_CONTEXT_FIELDS)
     assert client.lookup_calls == client.quote_calls == client.batch_calls == []
 
 
@@ -584,7 +584,7 @@ def test_unknown_model_decision_target_is_never_persisted(diligence):
     service, _client, _store = diligence
     project = service.create_project(
         workspace_id="workspace-invalid-target",
-        message="Screen one site for a 100 MW data center.",
+        message="Screen one site for a 100 MW / 400 MWh BESS.",
         candidates=["First Site"],
     )
     invalid = number_decision(
@@ -603,14 +603,14 @@ def test_grid_evidence_gap_becomes_application_owned_user_action(diligence):
     service, _client, _store = diligence
     project = service.create_project(
         workspace_id="workspace-grid-gap",
-        message="Screen one site for a 100 MW data center within 2 km of transmission.",
+        message="Screen one site for a 100 MW / 400 MWh BESS within 2 km of transmission.",
         candidates=["First Site"],
     )
-    proposal = choice_decision("How should I prove 100 MW deliverability?")
-    proposal["constraint_targets"] = ["sufficient_grid_capacity"]
+    proposal = choice_decision("How should I prove 100 MW export/injection interconnection?")
+    proposal["constraint_targets"] = ["bess_export_interconnection"]
     proposal["options"] = [{
         "id": "invented", "label": "Invented model choice", "description": "Must not become canonical.",
-        "value": requirement_value("sufficient_grid_capacity"), "consequence": "No application authority.",
+        "value": requirement_value("bess_export_interconnection"), "consequence": "No application authority.",
     }]
     proposal["recommended_option_id"] = "invented"
 
@@ -626,17 +626,17 @@ def test_mixed_unknown_decision_target_is_removed_before_canonical_action_is_per
     service, _client, _store = diligence
     project = service.create_project(
         workspace_id="workspace-grid-mixed-target",
-        message="Screen one site for a 100 MW data center.",
+        message="Screen one site for a 100 MW / 400 MWh BESS.",
         candidates=["First Site"],
     )
-    proposal = choice_decision("How should I prove 100 MW deliverability?")
-    proposal["constraint_targets"] = ["sufficient_grid_capacity", "model_created_constraint"]
+    proposal = choice_decision("How should I prove 100 MW export/injection interconnection?")
+    proposal["constraint_targets"] = ["bess_export_interconnection", "model_created_constraint"]
 
     decision = service.agent_decision(
         project["project_id"], mode="ASK_USER", decision_request=proposal,
     )["decision_request"]
 
-    assert decision["constraint_targets"] == ["sufficient_grid_capacity"]
+    assert decision["constraint_targets"] == ["bess_export_interconnection"]
     assert "model_created_constraint" not in str(service.get(project["project_id"])["active_decision"])
 
 
@@ -902,7 +902,7 @@ def _phase10_enrich(service, message, workspace_id="workspace-phase10"):
 def _phase10_blocked_project(service, workspace_id="workspace-phase10-blocked"):
     return _phase10_enrich(
         service,
-        "Compare this site for a 100 MW data center, 20-50 acres, within 2 km of transmission, "
+        "Compare this site for a 100 MW / 400 MWh BESS, 20-50 acres, within 2 km of transmission, "
         "within 1 km of road, with sufficient grid capacity, water capacity, and fiber diversity.",
         workspace_id,
     )
@@ -927,21 +927,21 @@ def test_phase10_partial_and_missing_critical_evidence_create_gap(diligence):
     service, _client, _store = diligence
     project = _phase10_blocked_project(service)
     intelligence = project["project_intelligence"]
-    grid = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "sufficient_grid_capacity")
-    gap = next(item for item in intelligence["unresolved_issues"] if item["requirement_id"] == "sufficient_grid_capacity")
+    grid = next(item for item in intelligence["evidence_coverage"] if item["requirement_id"] == "bess_export_interconnection")
+    gap = next(item for item in intelligence["unresolved_issues"] if item["requirement_id"] == "bess_export_interconnection")
 
     assert grid["coverage"] == "PARTIAL"
     assert grid["status"] == "UNRESOLVED"
-    assert "utility_confirmed_deliverable_capacity_mw" in grid["missing_evidence"]
+    assert "utility_or_iso_confirmed_export_injection_capacity_mw" in grid["missing_evidence"]
     assert gap["blocking"] is True and gap["impact"] == "CRITICAL"
 
 
 def test_phase10_evidence_gap_deduplicates_across_recalculation(diligence):
     service, _client, _store = diligence
     project = _phase10_blocked_project(service, "workspace-phase10-dedupe")
-    first = next(item for item in project["project_intelligence"]["unresolved_issues"] if item["requirement_id"] == "sufficient_grid_capacity")
+    first = next(item for item in project["project_intelligence"]["unresolved_issues"] if item["requirement_id"] == "bess_export_interconnection")
     second_state = service.evaluate_evidence_coverage(project["project_id"])
-    second = next(item for item in second_state["unresolved_issues"] if item["requirement_id"] == "sufficient_grid_capacity")
+    second = next(item for item in second_state["unresolved_issues"] if item["requirement_id"] == "bess_export_interconnection")
 
     assert second["gap_id"] == first["gap_id"]
     assert second["created_at"] == first["created_at"]
@@ -957,7 +957,10 @@ def test_phase10_next_action_ranking_is_deterministic_and_prioritizes_critical_b
     assert [(item["action_id"], item["score"]) for item in first["prioritized_actions"]] == [
         (item["action_id"], item["score"]) for item in second["prioritized_actions"]
     ]
-    assert first["prioritized_actions"][0]["type"] == "UTILITY_CAPACITY_INTERCONNECTION_RFI"
+    assert first["prioritized_actions"][0]["type"] == "BESS_EXPORT_INTERCONNECTION_RFI"
+    assert first["prioritized_actions"][0]["requirement_id"] == "bess_export_interconnection"
+    assert first["prioritized_actions"][0]["recipient_category"] == "Serving utility or ISO/RTO storage interconnection team"
+    assert all(item["type"] != "UTILITY_CAPACITY_INTERCONNECTION_RFI" for item in first["prioritized_actions"])
     assert first["prioritized_actions"][0]["score_provenance"]["critical_milestone"]["blocking"] is True
 
 
@@ -978,12 +981,13 @@ def test_phase10_generated_rfi_references_validated_missing_evidence(diligence):
     action = service.next_actions(project["project_id"])["prioritized_actions"][0]
     draft = service.create_rfi_draft(
         project["project_id"], action["action_id"],
-        "Please confirm the capacity and interconnection pathway available for this proposed 100 MW site and identify the required study process.",
+        "Please confirm the export/injection capacity and storage interconnection pathway available for this proposed 100 MW BESS and identify the required study process.",
     )
 
-    assert draft["type"] == "UTILITY_CAPACITY_INTERCONNECTION_RFI"
+    assert draft["type"] == "BESS_EXPORT_INTERCONNECTION_RFI"
     assert draft["required_evidence"] == action["required_evidence"]
-    assert "utility_confirmed_deliverable_capacity_mw" in draft["required_evidence"]
+    assert "utility_or_iso_confirmed_export_injection_capacity_mw" in draft["required_evidence"]
+    assert draft["recipient_category"] == "Serving utility or ISO/RTO storage interconnection team"
     assert draft["human_approval_required"] is True and draft["status"] == "DRAFT"
     refreshed_action = next(item for item in service.evaluate_evidence_coverage(project["project_id"])["recommended_actions"] if item["action_id"] == action["action_id"])
     assert refreshed_action["status"] == "DRAFTED" and refreshed_action["rfi_id"] == draft["rfi_id"]
@@ -993,7 +997,7 @@ def test_phase10_agent_generates_rfi_wording_for_validated_action(diligence):
     service, _client, _store = diligence
     project = _phase10_blocked_project(service, "workspace-phase10-agent-rfi")
     action = service.next_actions(project["project_id"])["prioritized_actions"][0]
-    request_text = "Please confirm deliverable capacity for the proposed 100 MW phase and identify the applicable interconnection studies and required submissions."
+    request_text = "Please confirm export/injection capacity for the proposed 100 MW BESS phase and identify the applicable storage interconnection studies and required submissions."
     model = ScriptedModel([
         tool("get_next_actions", {"project_id": project["project_id"]}, "actions"),
         tool("draft_project_rfi", {"project_id": project["project_id"], "action_id": action["action_id"], "generated_request": request_text}, "draft"),
@@ -1012,24 +1016,24 @@ def test_phase10_agent_explains_unresolved_requirement_from_structured_state(dil
     project = _phase10_blocked_project(service, "workspace-phase10-agent")
     model = ScriptedModel([
         tool("get_project_intelligence", {"project_id": project["project_id"]}, "intelligence"),
-        ModelReply(message="Power remains unresolved because utility-confirmed deliverability is missing. The first next action is a utility interconnection request.", tool_calls=[], response_items=[]),
+        ModelReply(message="Interconnection remains unresolved because utility or ISO/RTO-confirmed export/injection capacity is missing. The first next action is a storage interconnection request.", tool_calls=[], response_items=[]),
     ])
 
     response = run(SandboxAgent(model=model, diligence=service).chat_project(project["project_id"], "phase10-agent", "Why is this site not ready?"))
 
     assert response["tool_trace"][0]["tool"] == "get_project_intelligence"
-    assert "utility-confirmed deliverability is missing" in response["message"]
+    assert "export/injection capacity is missing" in response["message"]
 
 
 def test_phase10_agent_cannot_invent_pass_fail_result(diligence):
     service, _client, _store = diligence
     project = _phase10_blocked_project(service, "workspace-phase10-authority")
-    model = ScriptedModel([ModelReply(message="100 MW deliverability: PASS", tool_calls=[], response_items=[])])
+    model = ScriptedModel([ModelReply(message="100 MW BESS export/injection interconnection: PASS", tool_calls=[], response_items=[])])
 
     response = run(SandboxAgent(model=model, diligence=service).chat_project(project["project_id"], "phase10-authority", "Is power ready?"))
 
     assert response["message"].startswith("I cannot support that outcome claim")
-    grid = next(item for item in response["project"]["project_intelligence"]["evidence_coverage"] if item["requirement_id"] == "sufficient_grid_capacity")
+    grid = next(item for item in response["project"]["project_intelligence"]["evidence_coverage"] if item["requirement_id"] == "bess_export_interconnection")
     assert grid["status"] == "UNRESOLVED"
 
 

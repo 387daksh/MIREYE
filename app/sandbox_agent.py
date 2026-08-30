@@ -12,15 +12,15 @@ import httpx
 
 from app.config import OPENAI_API_KEY, SANDBOX_AGENT_MODEL, SANDBOX_AGENT_REASONING_EFFORT
 from app.infrastructure.observability import record_model_usage, span
-from app.sandbox import ConfirmationRequired, SiteSnapshotService, campus_component_object, scene_state_from_snapshot
+from app.sandbox import ConfirmationRequired, SiteSnapshotService, facility_component_object, scene_state_from_snapshot
 from app.sandbox_evaluator import SceneValidationError, build_oriented_footprint, evaluate_site
-from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_data_center_proposal
+from app.sandbox_proposal import DEFAULT_MINIMUM_SETBACK_M, generate_bess_proposal
 from app.sandbox_scenarios import ScenarioError, ScenarioService
 
 
-SYSTEM_INSTRUCTIONS = """You are the MIREYE Site Sandbox site-planning copilot. MIREYE/source evidence is authoritative for factual site data. OBSERVED data is factual, DERIVED data is deterministic, and PROPOSED campus objects are conceptual simulations. Begin every request with get_site_context using the provided snapshot ID. Use tools for all factual claims, proposal changes, and evaluations. PASS, FAIL, and UNRESOLVED only come from evaluate_scenario; never calculate or decide them yourself. Point-scoped flood, slope, and proximity results must never be described as parcel-wide or capacity/access proof. For an unqualified fit request, evaluate footprint_inside_parcel, footprint_area, and parcel_coverage only. Do not request minimum_setback without a numeric minimum_m. When proposing a campus, select only the conceptual element roles useful to the stated project; deterministic tools own their geometry. When the user asks for a second, alternative, or another layout and an active scenario exists, call branch_scenario, make a validated geometry change with transform_object or optimize_layout, and evaluate it; never remove or overwrite the existing layout, and never describe an identical branch as an alternative. The semantic campus components are conceptual massing inside the deterministically evaluated planning envelope, not engineering designs. Never invent values, parcel facts, geometry, or engineering conclusions. Do not claim engineering-grade analysis. If evidence cannot prove a request, state UNRESOLVED. You may inspect MIREYE freshness and request a quote. A MIREYE refresh can run only after the application has supplied explicit confirmation; you cannot create confirmation yourself. In the final user-facing response, use plain site-planning language and do not mention tool names, internal object IDs, evidence IDs, snapshot IDs, schema versions, or API implementation details."""
+SYSTEM_INSTRUCTIONS = """You are the MIREYE Site Sandbox site-planning copilot for a conceptual battery energy storage system (BESS). MIREYE/source evidence is authoritative for factual site data. OBSERVED data is factual, DERIVED data is deterministic, and the PROPOSED BESS facility is a conceptual simulation. Begin every request with get_site_context using the provided snapshot ID. Use tools for all factual claims, proposal changes, and evaluations. PASS, FAIL, and UNRESOLVED only come from evaluate_scenario; never calculate or decide them yourself. Point-scoped flood, slope, and proximity results must never be described as parcel-wide or interconnection/access proof. For an unqualified fit request, evaluate footprint_inside_parcel, footprint_area, and parcel_coverage only. Do not request minimum_setback without a numeric minimum_m. When proposing a BESS facility, select only the conceptual battery-enclosure, inverter/PCS, point-of-interconnection, access, service, and expansion roles useful to the request; deterministic tools own their geometry. When the user asks for a second, alternative, or another layout and an active scenario exists, call branch_scenario, make a validated geometry change with transform_object or optimize_layout, and evaluate it; never remove or overwrite the existing layout, and never describe an identical branch as an alternative. The semantic BESS components are conceptual massing inside the deterministically evaluated planning envelope, not engineering designs. Never invent dispatch profiles, efficiency, values, parcel facts, geometry, or engineering conclusions. Do not claim engineering-grade analysis. If evidence cannot prove a request, state UNRESOLVED. You may inspect MIREYE freshness and request a quote. A MIREYE refresh can run only after the application has supplied explicit confirmation; you cannot create confirmation yourself. In the final user-facing response, use plain site-planning language and do not mention tool names, internal object IDs, evidence IDs, snapshot IDs, schema versions, or API implementation details."""
 
-DILIGENCE_SYSTEM_INSTRUCTIONS = """You are the single MIREYE site-diligence orchestrator. Work only with candidates supplied in the current project; statewide inverse parcel discovery is unavailable and the synthetic screen endpoint is prohibited. Begin by reading the persisted requirement context and discovery capabilities. The requirement context includes the original request, current ConstraintSpec, machine-only capability schemas, evidence limitations, completed decisions, assumptions, candidate state, workflow step, spend state, deterministic ProjectIntelligence, PowerReadiness, EntitlementState, and recent ProjectChanges. Treat semantic strength literally: DIRECTLY_VERIFIED is a sourced fact, SOURCE_BACKED_SIGNAL is context only, DERIVED is a deterministic calculation, INSUFFICIENT_EVIDENCE cannot support a claim, and UNSUPPORTED_SEMANTICS cannot be upgraded by explanation. Decide whether to AUTO_CONTINUE, ASSUME_AND_CONTINUE, or ASK_USER. Ask only for the minimum information that materially blocks safe progress. For ASK_USER, generate the question, context, answer mode, useful options or custom input schema, recommendation, and explanation from this project's actual context; there is no predefined conversation tree. Every option and assumption must carry a typed constraint value allowed by the supplied capability schema. HARD_BLOCK is application-owned and cannot be created by you. Stop when a DecisionRequest is created and wait for its resume token. Use typed tools for candidate resolution, MIREYE field planning, quoting, enrichment, evaluation, ranking, evidence, freshness, project intelligence, power readiness, entitlement, next actions, RFI drafts, and change summaries. Explain unresolved requirements only from structured state. Describe a change or its materiality only from structured ProjectChange records. Recommend only deterministically ranked actions. RFI wording may be generated dynamically, but its required evidence, site, project load, and recipient category come from the validated action; drafts require human approval and are never sent automatically. You cannot create confirmation: identity, enrichment cost, refresh, and MIREYE site questions require application-owned decisions. Never invent candidate facts, changes, costs, timelines, numerical scores, geometry, grid capacity, interconnection status, permit status, legal conclusions, legal access, parcel-wide slope, parcel-wide flood safety, zoning meaning, or evaluator logic. Proximity, voltage, queue totals, and mapped equipment never prove deliverable MW. Raw zoning never proves a permitted use. Deterministic tools alone validate constraints and produce PASS, FAIL, and UNRESOLVED. Call a candidate a winner only when the deterministic decision status is DECISION_READY; ties and unresolved results are NO_DECISION_YET. In final user-facing responses, use plain project language and do not expose snapshot IDs, internal constraint/action/evidence IDs, schema versions, or tool names."""
+DILIGENCE_SYSTEM_INSTRUCTIONS = """You are the single MIREYE BESS site-diligence orchestrator. Work only with candidates supplied in the current project; statewide inverse parcel discovery is unavailable and the synthetic screen endpoint is prohibited. Begin by reading the persisted requirement context and discovery capabilities. The requirement context includes the original request, current ConstraintSpec, machine-only capability schemas, evidence limitations, completed decisions, assumptions, candidate state, workflow step, spend state, deterministic ProjectIntelligence, PowerReadiness, EntitlementState, and recent ProjectChanges. Treat semantic strength literally: DIRECTLY_VERIFIED is a sourced fact, SOURCE_BACKED_SIGNAL is context only, DERIVED is a deterministic calculation, INSUFFICIENT_EVIDENCE cannot support a claim, and UNSUPPORTED_SEMANTICS cannot be upgraded by explanation. Decide whether to AUTO_CONTINUE, ASSUME_AND_CONTINUE, or ASK_USER. Ask only for the minimum information that materially blocks safe progress. For ASK_USER, generate the question, context, answer mode, useful options or custom input schema, recommendation, and explanation from this project's actual context; there is no predefined conversation tree. Every option and assumption must carry a typed constraint value allowed by the supplied capability schema. HARD_BLOCK is application-owned and cannot be created by you. Stop when a DecisionRequest is created and wait for its resume token. Use typed tools for candidate resolution, MIREYE field planning, quoting, enrichment, evaluation, ranking, evidence, freshness, project intelligence, power readiness, entitlement, next actions, RFI drafts, and change summaries. Explain unresolved requirements only from structured state. Describe a change or its materiality only from structured ProjectChange records. Recommend only deterministically ranked actions. RFI wording may be generated dynamically, but its required evidence, site, BESS power/energy/duration, and recipient category come from the validated action; drafts require human approval and are never sent automatically. You cannot create confirmation: identity, enrichment cost, refresh, and MIREYE site questions require application-owned decisions. Never invent candidate facts, changes, costs, timelines, numerical scores, geometry, dispatch profile, efficiency, export or injection capability, interconnection status, permit status, legal conclusions, legal access, parcel-wide slope, parcel-wide flood safety, zoning meaning, or evaluator logic. Proximity, voltage, queue totals, and mapped equipment never prove export or injection interconnection capability. Raw zoning never proves a permitted energy-storage use. Deterministic tools alone validate constraints and produce PASS, FAIL, and UNRESOLVED. Call a candidate a winner only when the deterministic decision status is DECISION_READY; ties and unresolved results are NO_DECISION_YET. In final user-facing responses, use plain project language and do not expose snapshot IDs, internal constraint/action/evidence IDs, schema versions, or tool names."""
 
 
 def _tool(name: str, description: str, properties: dict, required: list[str]) -> dict:
@@ -34,7 +34,7 @@ BOOLEAN = {"type": ["boolean", "null"]}
 CONSTRAINT_SPEC = {
     "type": "object",
     "properties": {
-        "constraint_id": {"type": "string", "enum": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in", "parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "sufficient_grid_capacity"]},
+        "constraint_id": {"type": "string", "enum": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in", "parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "bess_export_interconnection"]},
         "object_id": STRING, "minimum_m": NUMBER, "min_m2": NUMBER, "max_m2": NUMBER, "max_percent": NUMBER, "max_degrees": NUMBER,
         "max_acres": NUMBER, "max_fraction": NUMBER, "max_distance_m": NUMBER, "allowed_codes": STRING_LIST, "required_statuses": STRING_LIST, "require_operational": BOOLEAN,
     },
@@ -43,16 +43,17 @@ CONSTRAINT_SPEC = {
 }
 TOOL_DEFINITIONS = [
     _tool("get_site_context", "Read immutable site facts, evidence summary, available constraints, and the current session scene.", {"snapshot_id": {"type": "string"}}, ["snapshot_id"]),
-    _tool("propose_data_center", "Generate a parcel-derived conceptual data-center campus. Select useful conceptual element roles from project context; deterministic tools place them. Omitted dimensions may be uniformly reduced; explicit dimensions remain fixed.", {
-        "capacity_mw": {"type": "number"}, "width_m": NUMBER, "length_m": NUMBER, "height_m": NUMBER,
+    _tool("propose_bess_facility", "Generate a parcel-derived conceptual BESS facility. Deterministic tools place battery enclosures, inverter/PCS blocks, and the point of interconnection. Omitted dimensions may be uniformly reduced; explicit dimensions remain fixed.", {
+        "power_mw": {"type": "number"}, "energy_mwh": {"type": "number"}, "duration_hours": {"type": "number"},
+        "expansion_power_mw": {"type": "number"}, "expansion_energy_mwh": {"type": "number"}, "width_m": NUMBER, "length_m": NUMBER, "height_m": NUMBER,
         "position": {"type": ["object", "null"], "properties": {"x_m": NUMBER, "y_m": NUMBER}, "required": ["x_m", "y_m"], "additionalProperties": False}, "rotation_deg": NUMBER,
         "minimum_setback_m": NUMBER,
-        "elements": {"type": ["array", "null"], "items": {"type": "string", "enum": ["data_halls", "electrical_area", "cooling_plant", "internal_access", "service_parking", "expansion_reserve"]}},
-    }, ["capacity_mw", "width_m", "length_m", "height_m", "position", "rotation_deg", "minimum_setback_m", "elements"]),
-    _tool("transform_object", "Move, resize, rotate, or set capacity on one proposed object. Move uses local-meter deltas; rotate sets an absolute degree value.", {
-        "object_id": {"type": "string"}, "operation": {"type": "string", "enum": ["move", "resize", "rotate", "set_capacity"]},
-        "delta_x_m": NUMBER, "delta_y_m": NUMBER, "width_m": NUMBER, "length_m": NUMBER, "height_m": NUMBER, "rotation_deg": NUMBER, "capacity_mw": NUMBER,
-    }, ["object_id", "operation", "delta_x_m", "delta_y_m", "width_m", "length_m", "height_m", "rotation_deg", "capacity_mw"]),
+        "elements": {"type": ["array", "null"], "items": {"type": "string", "enum": ["battery_enclosures", "inverter_pcs", "point_of_interconnection", "internal_access", "service_area", "expansion_reserve"]}},
+    }, ["power_mw", "energy_mwh", "duration_hours", "expansion_power_mw", "expansion_energy_mwh", "width_m", "length_m", "height_m", "position", "rotation_deg", "minimum_setback_m", "elements"]),
+    _tool("transform_object", "Move, resize, rotate, or set power, energy, and duration on one proposed object. Move uses local-meter deltas; rotate sets an absolute degree value.", {
+        "object_id": {"type": "string"}, "operation": {"type": "string", "enum": ["move", "resize", "rotate", "set_storage_capacity"]},
+        "delta_x_m": NUMBER, "delta_y_m": NUMBER, "width_m": NUMBER, "length_m": NUMBER, "height_m": NUMBER, "rotation_deg": NUMBER, "power_mw": NUMBER, "energy_mwh": NUMBER, "duration_hours": NUMBER,
+    }, ["object_id", "operation", "delta_x_m", "delta_y_m", "width_m", "length_m", "height_m", "rotation_deg", "power_mw", "energy_mwh", "duration_hours"]),
     _tool("evaluate_scenario", "Run the deterministic evaluator. Use only supported constraint IDs and report its output exactly.", {"requested_constraints": {"type": "array", "items": CONSTRAINT_SPEC}}, ["requested_constraints"]),
     _tool("get_evidence", "Read stored factual evidence only; this never fetches new data.", {"evidence_ids": {"type": "array", "items": {"type": "string"}}, "constraint_id": STRING}, ["evidence_ids", "constraint_id"]),
     _tool("check_evidence_freshness", "Check stored MIREYE evidence freshness. This never fetches or spends credits.", {"snapshot_id": {"type": "string"}}, ["snapshot_id"]),
@@ -62,7 +63,7 @@ TOOL_DEFINITIONS = [
         "snapshot_id": {"type": "string"},
         "requested_layers": {"type": "array", "items": {"type": "string", "enum": ["terrain", "roads", "buildings", "water", "land_cover", "transmission"]}},
     }, ["snapshot_id", "requested_layers"]),
-    _tool("optimize_layout", "Deterministically reposition the existing campus planning envelope within a requested parcel setback.", {"object_id": {"type": "string"}, "minimum_setback_m": {"type": "number"}}, ["object_id", "minimum_setback_m"]),
+    _tool("optimize_layout", "Deterministically reposition the existing BESS planning envelope within a requested parcel setback.", {"object_id": {"type": "string"}, "minimum_setback_m": {"type": "number"}}, ["object_id", "minimum_setback_m"]),
     _tool("branch_scenario", "Create a persisted scenario branch from the active scenario.", {"scenario_id": {"type": "string"}, "user_intent": {"type": "string"}}, ["scenario_id", "user_intent"]),
     _tool("compare_scenarios", "Run deterministic comparison for two persisted scenarios.", {"left_scenario_id": {"type": "string"}, "right_scenario_id": {"type": "string"}}, ["left_scenario_id", "right_scenario_id"]),
     _tool("remove_object", "Remove one proposed object from this in-memory session.", {"object_id": {"type": "string"}}, ["object_id"]),
@@ -138,7 +139,7 @@ DILIGENCE_TOOL_DEFINITIONS = [
     _tool("compare_candidates", "Compare deterministic outcomes, values, units, and evidence IDs for selected candidates.", {"project_id": {"type": "string"}, "candidate_ids": {"type": "array", "items": {"type": "string"}, "minItems": 2}}, ["project_id", "candidate_ids"]),
     _tool("get_project_intelligence", "Read deterministic readiness, evidence coverage, blockers, and evidence dependencies.", {"project_id": {"type": "string"}}, ["project_id"]),
     _tool("get_project_changes", "Read deterministic evidence changes and their propagated impact; never infer changes outside this result.", {"project_id": {"type": "string"}, "since": {"type": ["number", "null"]}}, ["project_id", "since"]),
-    _tool("get_power_readiness", "Read deterministic power context, deliverability blockers, provenance, and actions for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
+    _tool("get_power_readiness", "Read deterministic power context, export/injection interconnection blockers, provenance, and actions for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
     _tool("get_entitlement_state", "Read jurisdiction, zoning, approval-path evidence, legal-review flags, and actions for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
     _tool("refresh_authoritative_sources", "Retrieve only the application's allow-listed public power and jurisdiction sources for one enriched site.", {"project_id": {"type": "string"}, "site_id": {"type": "string"}}, ["project_id", "site_id"]),
     _tool("get_next_actions", "Return the deterministic next-action ranking and its score provenance.", {"project_id": {"type": "string"}}, ["project_id"]),
@@ -161,10 +162,10 @@ def _validated_diligence_message(message: str, project: dict) -> str:
     """Reject explicit outcome claims that do not match deterministic coverage."""
     claims = re.findall(r"([A-Za-z][A-Za-z0-9 _/-]{1,60}?)\s*(?::|\bis\b)\s*(PASS|FAIL|UNRESOLVED)\b", message, re.IGNORECASE)
     power_claim = any(re.search(pattern, message, re.IGNORECASE) for pattern in (
-        r"\bdeliverability\s+(?:is\s+)?(?:confirmed|verified|available)\b",
-        r"\b\d+(?:\.\d+)?\s*mw\s+(?:is\s+)?(?:available|deliverable|committed)\b",
+        r"\b(?:export|injection|interconnection)\s+(?:capability\s+)?(?:is\s+)?(?:confirmed|verified|available|approved)\b",
+        r"\b\d+(?:\.\d+)?\s*mw\s+(?:of\s+)?(?:export|injection)\s+(?:is\s+)?(?:available|confirmed|approved)\b",
     ))
-    legal_claim = bool(re.search(r"\bdata[- ]center\s+(?:use\s+)?is\s+(?:legally\s+)?(?:permitted|approved)\b", message, re.IGNORECASE))
+    legal_claim = bool(re.search(r"\b(?:bess|energy[- ]storage)\s+(?:use\s+)?is\s+(?:legally\s+)?(?:permitted|approved)\b", message, re.IGNORECASE))
     power = (project.get("project_intelligence") or {}).get("power_readiness") or {}
     entitlement = (project.get("project_intelligence") or {}).get("entitlement") or {}
     if power_claim and power.get("readiness_state") != "VERIFIED" or legal_claim and entitlement.get("readiness_state") != "VERIFIED":
@@ -276,7 +277,7 @@ class SandboxToolExecutor:
             raise ToolValidationError("Tool arguments must be a JSON object.")
         handlers = {
             "get_site_context": self._get_site_context,
-            "propose_data_center": self._propose_data_center,
+            "propose_bess_facility": self._propose_bess_facility,
             "transform_object": self._transform_object,
             "evaluate_scenario": self._evaluate_scenario,
             "optimize_layout": self._optimize_layout,
@@ -308,11 +309,11 @@ class SandboxToolExecutor:
                 parent_footprint = build_oriented_footprint(object_state)
                 component_footprints = []
                 for component in object_state.get("components", []):
-                    footprint = build_oriented_footprint(campus_component_object(object_state, component))
+                    footprint = build_oriented_footprint(facility_component_object(object_state, component))
                     if not parent_footprint.covers(footprint):
-                        raise ToolValidationError(f"Proposed component leaves the campus planning envelope: {component['id']}.")
+                        raise ToolValidationError(f"Proposed component leaves the facility planning envelope: {component['id']}.")
                     if any(footprint.intersects(other) for other in component_footprints):
-                        raise ToolValidationError(f"Proposed component overlaps another campus component: {component['id']}.")
+                        raise ToolValidationError(f"Proposed component overlaps another facility component: {component['id']}.")
                     component_footprints.append(footprint)
             except SceneValidationError as exc:
                 raise ToolValidationError(str(exc)) from exc
@@ -346,18 +347,22 @@ class SandboxToolExecutor:
             "observed_geometry": {"type": self.snapshot["geometry"].get("type"), "source": self.snapshot["parcel_identity"].get("parcel_data_source"), "origin": "OBSERVED"},
             "evidence_summary": {key: {"status": value.get("status"), "scope": value.get("scope"), "source": value.get("source"), "semantic_strength": value.get("semantic_strength"), "claim_limits": value.get("claim_limits", []), "expires_at": value.get("expires_at")} for key, value in self.snapshot.get("evidence", {}).items()},
             "available_constraints": ["footprint_inside_parcel", "minimum_setback", "footprint_area", "parcel_coverage", "object_collision", "max_nwi_wetland_fraction_of_parcel", "max_nwi_wetland_acres_on_parcel", "resolution_point_outside_fema_sfha", "max_resolution_point_slope_degrees", "max_resolution_point_substation_distance_m", "max_resolution_point_transmission_distance_m", "max_resolution_point_major_road_distance_m", "parcel_zoning_code_in"],
-            "unresolved_constraints": ["parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "sufficient_grid_capacity"],
+            "unresolved_constraints": ["parcel_outside_fema_sfha", "footprint_outside_fema_sfha", "max_slope_degrees", "industrial_zoning", "energy_storage_entitlement", "legal_access", "heavy_haul_suitability", "utilities_available", "utility_capacity", "substation_available_capacity_mw", "transmission_available_capacity_mw", "bess_export_interconnection"],
             "scene_state": copy.deepcopy(self.session.scene_state),
         }
 
-    def _propose_data_center(self, arguments: dict) -> dict:
-        allowed = {"capacity_mw", "width_m", "length_m", "height_m", "position", "rotation_deg", "minimum_setback_m", "elements"}
+    def _propose_bess_facility(self, arguments: dict) -> dict:
+        allowed = {"power_mw", "energy_mwh", "duration_hours", "expansion_power_mw", "expansion_energy_mwh", "width_m", "length_m", "height_m", "position", "rotation_deg", "minimum_setback_m", "elements"}
         self._only(arguments, allowed, allowed)
         try:
-            proposal = generate_data_center_proposal(
+            proposal = generate_bess_proposal(
                 self.snapshot,
                 self.session.scene_state,
-                capacity_mw=arguments["capacity_mw"],
+                power_mw=arguments["power_mw"],
+                energy_mwh=arguments["energy_mwh"],
+                duration_hours=arguments["duration_hours"],
+                expansion_power_mw=arguments["expansion_power_mw"],
+                expansion_energy_mwh=arguments["expansion_energy_mwh"],
                 width_m=arguments["width_m"],
                 length_m=arguments["length_m"],
                 height_m=arguments["height_m"],
@@ -376,7 +381,7 @@ class SandboxToolExecutor:
         return proposal
 
     def _transform_object(self, arguments: dict) -> dict:
-        allowed = {"object_id", "operation", "delta_x_m", "delta_y_m", "width_m", "length_m", "height_m", "rotation_deg", "capacity_mw"}
+        allowed = {"object_id", "operation", "delta_x_m", "delta_y_m", "width_m", "length_m", "height_m", "rotation_deg", "power_mw", "energy_mwh", "duration_hours"}
         self._only(arguments, allowed, allowed)
         scene = copy.deepcopy(self.session.scene_state)
         object_state, parent = self._find_target(arguments["object_id"], scene)
@@ -419,28 +424,35 @@ class SandboxToolExecutor:
                 geometry["rotation_deg"] = arguments["rotation_deg"]
             else:
                 geometry["rotation_offset_deg"] = float(arguments["rotation_deg"]) - float(parent["geometry_local"]["rotation_deg"])
-        elif operation == "set_capacity":
-            if arguments["capacity_mw"] is None:
-                raise ToolValidationError("set_capacity requires capacity_mw.")
+        elif operation == "set_storage_capacity":
+            if any(arguments[key] is None for key in ("power_mw", "energy_mwh", "duration_hours")):
+                raise ToolValidationError("set_storage_capacity requires power_mw, energy_mwh, and duration_hours.")
             if parent is not None:
-                raise ToolValidationError("Set capacity on the campus, not an individual conceptual component.")
+                raise ToolValidationError("Set storage capacity on the facility, not an individual conceptual component.")
             try:
-                capacity = float(arguments["capacity_mw"])
+                power = float(arguments["power_mw"])
+                energy = float(arguments["energy_mwh"])
+                duration = float(arguments["duration_hours"])
             except (TypeError, ValueError) as exc:
-                raise ToolValidationError("capacity_mw must be numeric.") from exc
-            if capacity <= 0:
-                raise ToolValidationError("capacity_mw must be positive.")
-            object_state["attributes"]["capacity_mw"] = capacity
-            target = max(capacity, float(object_state["attributes"].get("expansion_target_mw", capacity)))
-            object_state["attributes"]["expansion_target_mw"] = target
-            halls = [item for item in object_state.get("components", []) if item.get("kind") == "data_hall"]
-            for hall in halls:
-                hall["attributes"]["capacity_mw"] = round(capacity / len(halls), 3)
+                raise ToolValidationError("BESS power, energy, and duration must be numeric.") from exc
+            if power <= 0 or energy <= 0 or duration <= 0 or not math.isclose(energy, power * duration):
+                raise ToolValidationError("BESS power, energy, and duration must be positive and energy_mwh must equal power_mw multiplied by duration_hours.")
+            attributes = object_state["attributes"]
+            attributes.update(capacity_mw=power, power_mw=power, energy_mwh=energy, duration_hours=duration)
+            target_power = max(power, float(attributes.get("expansion_power_mw", power)))
+            target_energy = max(energy, float(attributes.get("expansion_energy_mwh", energy)))
+            attributes.update(expansion_power_mw=target_power, expansion_energy_mwh=target_energy)
+            enclosures = [item for item in object_state.get("components", []) if item.get("kind") == "battery_enclosure"]
+            for enclosure in enclosures:
+                enclosure["attributes"].update(power_mw=round(power / len(enclosures), 3), energy_mwh=round(energy / len(enclosures), 3))
+            pcs_blocks = [item for item in object_state.get("components", []) if item.get("kind") == "inverter_pcs"]
+            for pcs in pcs_blocks:
+                pcs["attributes"]["power_mw"] = round(power / len(pcs_blocks), 3)
             reserve = next((item for item in object_state.get("components", []) if item.get("kind") == "expansion_reserve"), None)
             if reserve:
-                reserve["attributes"]["capacity_mw"] = round(target - capacity, 3)
+                reserve["attributes"].update(power_mw=round(target_power - power, 3), energy_mwh=round(target_energy - energy, 3))
         else:
-            raise ToolValidationError("operation must be move, resize, rotate, or set_capacity.")
+            raise ToolValidationError("operation must be move, resize, rotate, or set_storage_capacity.")
         self._commit(scene)
         return {"object_id": object_state["id"], "scene_version": self.session.scene_state["scene_version"], "scene_state": copy.deepcopy(self.session.scene_state)}
 
@@ -465,9 +477,13 @@ class SandboxToolExecutor:
         current = self._find_object(arguments["object_id"], self.session.scene_state)
         geometry = current["geometry_local"]
         try:
-            proposal = generate_data_center_proposal(
+            proposal = generate_bess_proposal(
                 self.snapshot, self.session.scene_state,
-                capacity_mw=current["attributes"]["capacity_mw"],
+                power_mw=current["attributes"]["power_mw"],
+                energy_mwh=current["attributes"]["energy_mwh"],
+                duration_hours=current["attributes"]["duration_hours"],
+                expansion_power_mw=current["attributes"]["expansion_power_mw"],
+                expansion_energy_mwh=current["attributes"]["expansion_energy_mwh"],
                 width_m=geometry["width_m"], length_m=geometry["length_m"], height_m=geometry["height_m"],
                 position=None, rotation_deg=None, minimum_setback_m=arguments["minimum_setback_m"],
                 elements=current.get("attributes", {}).get("selected_elements"),
@@ -603,8 +619,8 @@ class SandboxAgent:
                                     session.scenario_ids.append(known_id)
                     else:
                         result = executor.execute(call.get("name"), arguments)
-                    if self.scenarios and call.get("name") in {"propose_data_center", "transform_object", "optimize_layout", "remove_object", "reset_proposals", "evaluate_scenario"}:
-                        if call.get("name") == "propose_data_center" and result.get("status") not in {"PLACED", "ADJUSTED"}:
+                    if self.scenarios and call.get("name") in {"propose_bess_facility", "transform_object", "optimize_layout", "remove_object", "reset_proposals", "evaluate_scenario"}:
+                        if call.get("name") == "propose_bess_facility" and result.get("status") not in {"PLACED", "ADJUSTED"}:
                             pass
                         else:
                             if call.get("name") == "evaluate_scenario":

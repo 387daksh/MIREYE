@@ -1,6 +1,6 @@
 [
   {
-    "project_spec": {"project_type": "DATA_CENTER", "initial_capacity_mw": 100},
+    "project_spec": {"project_type": "BESS", "initial_capacity_mw": 100},
     "task_types": ["INSPECT_MIREYE_EVIDENCE", "ASSESS_POWER"],
     "evidence_ids": ["nearest_transmission_line_distance_m"],
     "verification": "PARTIALLY_VERIFIED",
@@ -8,7 +8,7 @@
     "state_hash_changed": false
   },
   {
-    "project_spec": {"project_type": "DATA_CENTER", "initial_capacity_mw": 150},
+    "project_spec": {"project_type": "BESS", "initial_capacity_mw": 150},
     "task_types": ["COMPARE_SCENARIOS"],
     "evidence_ids": [],
     "verification": "VERIFIED",

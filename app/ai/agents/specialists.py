@@ -11,7 +11,7 @@ from app.infrastructure.observability import span
 
 ROLE_INSTRUCTIONS = {
     AgentRole.SITE_INTELLIGENCE: "Inspect only site identity and MIREYE evidence. Do not resolve facts without evidence.",
-    AgentRole.POWER: "Assess power evidence only. Proximity, voltage, and queue context do not prove deliverability.",
+    AgentRole.POWER: "Assess power evidence only. Proximity, voltage, and queue context do not prove BESS export or injection interconnection capability.",
     AgentRole.ENTITLEMENT: "Assess entitlement evidence only. Raw zoning is not a legal permitted-use conclusion.",
     AgentRole.GEOSPATIAL: "Use source-backed world context and deterministic evaluations; do not calculate geometry.",
     AgentRole.DOCUMENT: "Return cited document findings and require human review for legal significance.",
