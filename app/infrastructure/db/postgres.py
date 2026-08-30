@@ -117,6 +117,11 @@ class PostgresWorkspaceStore(WorkspaceStore):
                 outbox = PostgresOutbox(self.database_url)
                 for event in self._orchestration_events(previous_state, project):
                     outbox.append(conn._connection, event)
+        # Graph rows are a queryable projection of authoritative project state.
+        # Keeping this after the state transaction avoids a second source of truth.
+        from app.ai.memory.graph import EvidenceGraphRepository
+
+        EvidenceGraphRepository(self).sync_project(project)
         return project
 
     @staticmethod

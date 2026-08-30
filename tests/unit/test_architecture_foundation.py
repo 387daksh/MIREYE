@@ -38,6 +38,7 @@ def test_production_selects_postgres_and_rejects_sqlite(tmp_path: Path):
         app_env="production",
         database_url="postgresql+psycopg://mireye:mireye@localhost/mireye",
         mireye_api_key="configured",
+        openai_api_key="configured",
         artifact_store_backend="s3",
         s3_bucket="mireye-world",
         workflow_backend="temporal",

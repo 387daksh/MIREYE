@@ -1,6 +1,6 @@
 import pytest
 from fastapi.testclient import TestClient
-from app.main import app
+from app.main import app, diligence_service
 
 
 @pytest.fixture(scope="module")
@@ -103,3 +103,16 @@ def test_workspace_lifecycle(client):
     r5 = client.get(f"/v1/workspace/{ws_id}/history/PCL-000005")
     assert r5.status_code == 200
     assert len(r5.json()["history"]) == 1
+
+
+def test_memory_retrieval_enforces_project_workspace(client):
+    project = diligence_service.create_project(
+        workspace_id="workspace-memory-api", message="Compare a 100 MW data center site.", candidates=["1032 Robotic Ave"]
+    )
+    path = f"/v1/diligence/projects/{project['project_id']}/memory/search?query=power"
+    denied = client.get(path, headers={"X-Mireye-Workspace-Id": "another-workspace"})
+    allowed = client.get(path, headers={"X-Mireye-Workspace-Id": "workspace-memory-api"})
+
+    assert denied.status_code == 403
+    assert allowed.status_code == 200
+    assert allowed.json()["project_id"] == project["project_id"]

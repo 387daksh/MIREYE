@@ -11,6 +11,8 @@ OPENAI_API_KEY = _settings.openai_api_key.get_secret_value()
 SANDBOX_AGENT_MODEL = _settings.sandbox_agent_model
 SANDBOX_AGENT_REASONING_EFFORT = _settings.sandbox_agent_reasoning_effort
 MODEL_PRICING = _settings.model_pricing
+EMBEDDING_MODEL = _settings.embedding_model
+EMBEDDING_DIMENSIONS = _settings.embedding_dimensions
 MIREYE_ENRICHMENT_BATCH_SIZE = _settings.mireye_enrichment_batch_size
 
 DATA_MODE = _settings.data_mode

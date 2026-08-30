@@ -69,26 +69,29 @@ const statusLabel = (value: unknown) => {
 
 export function ReadinessGrid({ intelligence }: { intelligence: Value }) {
   const readiness = record(intelligence.readiness);
+  const blockers = Number(record(intelligence.risk_state).critical_blockers);
   return <section className="intel-section">
     <h3>Project readiness</h3>
     <dl className="readiness-grid">{readinessOrder.map((domain) => {
       const status = statusLabel(record(readiness[domain]).status);
       return <div key={domain}><dt>{domain}</dt><dd className={`readiness-${status.toLowerCase().replace(" ", "-")}`}>{status}</dd></div>;
     })}</dl>
+    {Number.isFinite(blockers) && <p className="readiness-summary">{blockers ? `${blockers} critical blocker${blockers === 1 ? "" : "s"}` : "No critical blockers"}</p>}
   </section>;
 }
 
 export function BlockerList({ intelligence }: { intelligence: Value }) {
   const blockers = list(intelligence.unresolved_issues).filter((item) => item.blocking !== false);
   return <section className="intel-section"><h3>Critical blockers</h3>
-    {blockers.length ? <ul className="blocker-list">{blockers.map((item) => <li key={String(item.gap_id)}><span>{String(item.title)}</span><small>{String(item.domain ?? "Project")}</small></li>)}</ul> : <p className="quiet">No critical blockers recorded.</p>}
+    {blockers.length ? <ul className="blocker-list">{blockers.map((item) => <li key={String(item.gap_id)}><div><strong>{String(item.title)}</strong><p>{String(item.description ?? item.why_it_matters ?? "This requirement is not currently decision-provable.")}</p><small>Resolve: {String((Array.isArray(item.possible_resolution_methods) ? item.possible_resolution_methods[0] : undefined) ?? item.next_best_action ?? "Authoritative confirmation")}</small></div><span>{String(item.domain ?? "Project")}</span></li>)}</ul> : <p className="quiet">No critical blockers recorded.</p>}
   </section>;
 }
 
 export function NextActionList({ intelligence }: { intelligence: Value }) {
   const actions = list(intelligence.recommended_actions).slice(0, 3);
-  return <section className="intel-section"><h3>What should happen next</h3>
-    {actions.length ? <ol className="next-actions">{actions.map((item, index) => <li key={String(item.action_id ?? item.title)}><span>{index + 1}</span>{String(item.title)}</li>)}</ol> : <p className="quiet">No next action is currently recommended.</p>}
+  const next = actions[0];
+  return <section className="intel-section next-action-section"><h3>Next best action</h3>
+    {next ? <><strong>{String(next.title)}</strong><p>{String(next.expected_impact ? `${title(next.expected_impact)} impact` : "Resolve the highest-impact outstanding evidence gap.")}</p><a href="#sources">Review evidence <span aria-hidden="true">↗</span></a>{actions.length > 1 && <ol className="next-actions">{actions.slice(1).map((item, index) => <li key={String(item.action_id ?? item.title)}><span>{index + 2}</span>{String(item.title)}</li>)}</ol>}</> : <p className="quiet">No next action is currently recommended.</p>}
   </section>;
 }
 
@@ -96,17 +99,27 @@ export function EvidenceDetail({ evidence }: { evidence: Value }) {
   const observed = Number(evidence.observed_at);
   return <article className="evidence-detail">
     <div><strong>{words(evidence.evidence_id)}</strong><span className="semantic-tag observed">Observed</span></div>
-    <dl><div><dt>Source</dt><dd>{String(evidence.source ?? evidence.provider ?? "—")}</dd></div><div><dt>Scope</dt><dd>{words(evidence.scope || "—")}</dd></div><div><dt>Freshness</dt><dd>{evidence.status === "ok" ? "Current" : title(evidence.status ?? "Unknown")}</dd></div><div><dt>Timestamp</dt><dd>{Number.isFinite(observed) ? new Date(observed * 1000).toLocaleString() : "—"}</dd></div></dl>
+    <dl><div><dt>Source</dt><dd>{String(evidence.source ?? evidence.provider ?? "—")}</dd></div><div><dt>Scope</dt><dd>{words(evidence.scope || "—")}</dd></div><div><dt>Status</dt><dd>{evidence.status === "ok" ? "Current" : title(evidence.status ?? "Unknown")}</dd></div><div><dt>Retrieved</dt><dd>{Number.isFinite(observed) ? new Date(observed * 1000).toLocaleString() : "—"}</dd></div><div><dt>Evidence role</dt><dd>{words(evidence.semantic_strength ?? evidence.semantic_class ?? "Source-backed")}</dd></div><div><dt>Confidence</dt><dd>{String(evidence.confidence ?? "Not provided")}</dd></div></dl>
     {typeof evidence.source_url === "string" && <a href={evidence.source_url} target="_blank" rel="noreferrer">View source <span aria-hidden="true">↗</span></a>}
   </article>;
 }
 
 export function SourceDrawer({ intelligence }: { intelligence: Value }) {
   const evidence = list(intelligence.evidence_items);
-  return <details className="source-drawer"><summary>Sources / evidence</summary><div className="source-drawer-content">
+  return <details className="source-drawer" id="sources"><summary>Sources / evidence</summary><div className="source-drawer-content">
     {evidence.slice(0, 8).map((item) => <EvidenceDetail key={String(item.evidence_id)} evidence={item}/>)}
     {evidence.length > 8 && <p className="quiet">Showing 8 of {evidence.length} source records.</p>}
   </div></details>;
+}
+
+const displayValue = (item: Value) => {
+  const value = item.value;
+  if (typeof value === "number") return `${value.toLocaleString(undefined, { maximumFractionDigits: 1 })}${item.unit ? ` ${item.unit === "meters" ? "m" : item.unit}` : ""}`;
+  return value === null || value === undefined ? "Unresolved" : String(value);
+};
+
+function EvidenceHighlight({ item, evidence }: { item: Value; evidence?: Value }) {
+  return <article className="evidence-highlight"><div><strong>{String(item.label ?? item.key ?? "Evidence")}</strong><span className={item.state === "SOURCE_BACKED" ? "observed" : "derived"}>{title(item.state ?? "Observed")}</span></div><p><b>{displayValue(item)}</b><span>{String(item.source ?? evidence?.source ?? "MIREYE")}</span></p><small>{String(item.explanation ?? "")}</small></article>;
 }
 
 export function EvidenceSummary({ intelligence }: { intelligence: Value }) {
@@ -114,10 +127,59 @@ export function EvidenceSummary({ intelligence }: { intelligence: Value }) {
   const usable = evidence.filter((item) => item.status === "ok").length;
   const unresolved = list(intelligence.unresolved_issues).filter((item) => item.status === "OPEN").length;
   const freshness = String(record(intelligence.power_readiness).freshness ?? "UNKNOWN");
+  const highlights = list(record(intelligence.power_readiness).items).filter((item) => item.state === "SOURCE_BACKED" && item.value !== null && item.value !== undefined).slice(0, 2);
   return <section className="intel-section evidence-summary"><h3>Evidence</h3>
     <div className="evidence-count"><strong>{evidence.length}</strong><span>records</span></div>
     <div className="evidence-meta"><span>{usable} usable</span><span>{unresolved} unresolved</span><span>{title(freshness)}</span></div>
+    {highlights.map((item) => {
+      const ids = Array.isArray(item.evidence_ids) ? item.evidence_ids : [];
+      return <EvidenceHighlight key={String(item.key)} item={item} evidence={evidence.find((entry) => String(entry.evidence_id) === String(ids[0]))}/>;
+    })}
     <SourceDrawer intelligence={intelligence}/>
+  </section>;
+}
+
+export function ChangePanel({ intelligence }: { intelligence: Value }) {
+  const change = record(intelligence.change_impact);
+  const evidence = Array.isArray(change.changed_evidence_ids) ? change.changed_evidence_ids : [];
+  const requirements = Array.isArray(change.affected_requirement_ids) ? change.affected_requirement_ids : [];
+  if (!evidence.length) return null;
+  return <section className="intel-section change-panel"><h3>What changed</h3><strong>{evidence.length === 1 ? "Evidence changed" : `${evidence.length} evidence records changed`}</strong><p>{requirements.length ? `Readiness was recalculated for ${requirements.map(words).join(", ")}.` : "Review the updated evidence before relying on this project state."}</p><a href="#sources">Review updated evidence <span aria-hidden="true">↗</span></a></section>;
+}
+
+export function ProjectHistory({ state }: { state: Value }) {
+  const decisions = list(state.decision_history);
+  const latest = decisions.at(-1);
+  if (!latest) return null;
+  const evidence = list(record(state.project_intelligence).evidence_items);
+  const ids = Array.isArray(latest.evidence_ids) ? latest.evidence_ids.map(String) : [];
+  const cited = evidence.filter((item) => ids.includes(String(item.evidence_id))).slice(0, 2);
+  return <section className="intel-section history-panel"><h3>History</h3><span className="eyebrow">Previous decision</span>
+    <strong>{words(latest.title ?? latest.status ?? "Project decision")}</strong>
+    {typeof latest.rationale === "string" && <p>{latest.rationale}</p>}
+    {cited.length > 0 && <a href="#sources">View evidence <span aria-hidden="true">â†—</span></a>}
+  </section>;
+}
+
+export function MemoryContext({ state }: { state: Value }) {
+  const intelligence = record(state.project_intelligence);
+  const evidence = list(intelligence.evidence_items);
+  const coverage = list(intelligence.evidence_coverage);
+  const blockers = list(intelligence.unresolved_issues).filter((item) => item.blocking !== false);
+  const decisions = list(state.decision_history).slice(-2).reverse();
+  const active = record(intelligence.active_site);
+  const snapshotId = String(active.site_snapshot_id ?? evidence[0]?.snapshot_id ?? "");
+  const power = coverage.find((item) => String(item.requirement_id) === "sufficient_grid_capacity");
+  const powerIds = Array.isArray(power?.evidence_ids) ? power.evidence_ids.map(String) : [];
+  const sources = evidence.filter((item) => powerIds.includes(String(item.evidence_id))).slice(0, 3);
+  return <section className="intel-section memory-context"><h3>Context</h3>
+    <span className="eyebrow">Current</span><strong>{String(active.title ?? "Selected site")}</strong>
+    <p>{evidence.length} source-backed records · {snapshotId ? "Current snapshot available" : "No active snapshot"}</p>
+    {power && <details open><summary>Why power is {title(power.status)}</summary><p>{String(blockers.find((item) => String(item.requirement_id) === String(power.requirement_id))?.description ?? "Current evidence does not establish committed deliverability.")}</p>
+      <ul className="memory-sources">{sources.map((item) => <li key={String(item.evidence_id)}><span>{words(item.evidence_id)}</span><em>{String(item.source ?? item.provider ?? "Source")}</em></li>)}</ul>
+      <a href="#sources">View supporting evidence <span aria-hidden="true">â†—</span></a>
+    </details>}
+    {decisions.length > 0 && <div className="memory-history"><span className="eyebrow">History</span>{decisions.map((item) => <p key={String(item.decision_id)}><strong>{title(item.status ?? "Decision")}</strong> · {String(item.rationale ?? item.why_it_matters ?? item.question ?? "Recorded project decision")}</p>)}</div>}
   </section>;
 }
 
@@ -131,6 +193,8 @@ export function IntelligencePanel({ state }: { state: Value }) {
     <ReadinessGrid intelligence={intelligence}/>
     <BlockerList intelligence={intelligence}/>
     <NextActionList intelligence={intelligence}/>
+    <ChangePanel intelligence={intelligence}/>
+    <MemoryContext state={state}/>
     <EvidenceSummary intelligence={intelligence}/>
   </aside>;
 }

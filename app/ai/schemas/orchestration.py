@@ -311,6 +311,7 @@ class PlannerContext(StrictModel):
     current_evidence_ids: list[str] = Field(default_factory=list)
     completed_task_ids: list[str] = Field(default_factory=list)
     metered_operations: list[dict[str, Any]] = Field(default_factory=list)
+    memory_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class SpecialistContext(StrictModel):
@@ -322,12 +323,17 @@ class SpecialistContext(StrictModel):
     deterministic_outcomes: dict[str, str] = Field(default_factory=dict)
     prior_observations: list[dict[str, Any]] = Field(default_factory=list)
     user_decisions: list[dict[str, Any]] = Field(default_factory=list)
+    site_identity: dict[str, Any] = Field(default_factory=dict)
+    retrieval_context: dict[str, Any] = Field(default_factory=dict)
+    context_selection: dict[str, Any] = Field(default_factory=dict)
+    memory_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class VerifierContext(StrictModel):
     evidence_items: list[dict[str, Any]] = Field(default_factory=list)
     deterministic_outcomes: dict[str, str] = Field(default_factory=dict)
     now: float
+    memory_context: dict[str, Any] = Field(default_factory=dict)
 
 
 class UserDecisionContext(StrictModel):

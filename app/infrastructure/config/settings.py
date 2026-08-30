@@ -44,6 +44,8 @@ class Settings(BaseSettings):
     sandbox_agent_model: str = "gpt-5.6-sol"
     sandbox_agent_reasoning_effort: str = "high"
     model_pricing: dict[str, dict[str, float]] = Field(default_factory=dict)
+    embedding_model: str = "text-embedding-3-small"
+    embedding_dimensions: int = Field(default=1536, ge=1, le=1536)
 
     redis_url: str = "redis://localhost:6379/0"
     workflow_backend: Literal["local", "temporal"] = "local"
@@ -76,6 +78,8 @@ class Settings(BaseSettings):
                 raise ValueError("NATS_URL must be explicitly configured in production.")
             if "cors_origins" not in self.model_fields_set:
                 raise ValueError("CORS_ORIGINS must be explicitly configured in production.")
+            if not self.openai_api_key.get_secret_value():
+                raise ValueError("OPENAI_API_KEY must be configured in production.")
         return self
 
     @property

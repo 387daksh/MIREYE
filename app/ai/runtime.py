@@ -11,7 +11,7 @@ from app.ai.agents import SpecialistAgent
 from app.ai.accounting import finish as finish_accounting
 from app.ai.accounting import start as start_accounting
 from app.ai.evaluation import VerificationEngine
-from app.ai.memory import ProjectMemoryStore
+from app.ai.memory import DocumentMemoryService, ProjectMemoryStore, TaskContextBuilder
 from app.ai.planners import IntentInterpreter, TaskGraphPlanner
 from app.ai.schemas.orchestration import (
     AgentObservation,
@@ -46,9 +46,12 @@ class OrchestrationEngine:
         tools: PolicyToolRegistry,
         memory: ProjectMemoryStore,
         verifier: VerificationEngine | None = None,
+        document_memory: DocumentMemoryService | None = None,
     ):
         self.diligence, self.interpreter, self.planner = diligence, interpreter, planner
         self.tools, self.memory, self.verifier = tools, memory, verifier or VerificationEngine()
+        self.document_memory = document_memory
+        self.task_contexts = TaskContextBuilder(memory.context_builder)
         self.specialists = {role: SpecialistAgent(role, interpreter.model, tools) for role in AgentRole}
 
     async def begin(self, project_id: str, message: str, run_id: str | None = None) -> dict[str, Any]:
@@ -180,15 +183,10 @@ class OrchestrationEngine:
                 for task in ready:
                     self._record_event(run, "TASK_STARTED", task_id=task.task_id, role=task.agent_role.value)
                 self._save_run(run)
-                task_context = {
-                    **context,
-                    "project_spec": run.project_spec.model_dump(mode="json"),
-                    "prior_observations": [
-                        {"task_id": item.task_id, "status": item.status.value, "summary": item.summary}
-                        for item in run.observations
-                    ],
-                }
-                observations = await asyncio.gather(*[self.specialists[task.agent_role].execute(task, task_context) for task in ready])
+                observations = await asyncio.gather(*[
+                    self.specialists[task.agent_role].execute(task, await self._task_context(run, task, context))
+                    for task in ready
+                ])
                 for task, observation in zip(ready, observations):
                     run.observations.append(observation)
                     completed.add(task.task_id)
@@ -209,10 +207,28 @@ class OrchestrationEngine:
                             if key in {claim.requirement_id for claim in observation.claims if claim.requirement_id}
                         },
                         now=context.get("now", time.time()),
+                        memory_context=self.memory.context_builder.build(
+                            run.project_id, observation.summary, "verifier"
+                        ),
                     )
                     verification = self.verifier.verify(observation, verifier_context.model_dump(mode="json"))
                     run.verifications.append(verification)
                     self._record_event(run, "VERIFICATION", task_id=task.task_id, state=verification.state.value)
+                    verification_by_claim = {item.claim_id: item for item in verification.claims}
+                    for claim in observation.claims:
+                        claim_verification = verification_by_claim.get(claim.claim_id)
+                        if claim_verification is None or claim_verification.state.value not in {"VERIFIED", "PARTIALLY_VERIFIED", "NEEDS_HUMAN_REVIEW"}:
+                            continue
+                        self.memory.graph.record_validated_claim(run.project_id, {
+                            "claim_id": claim.claim_id,
+                            "claim_text": claim.text,
+                            "normalized_subject": claim.requirement_id or "project",
+                            "predicate": "asserts_outcome",
+                            "normalized_object": claim.asserted_outcome or "UNRESOLVED",
+                            "semantic_strength": "INTERPRETATION",
+                            "verification_status": claim_verification.state.value,
+                            "provenance": {"evidence_ids": claim_verification.evidence_ids, "task_id": task.task_id, "required_scope": claim.required_scope},
+                        })
                     if task.success_condition.kind == SuccessKind.USER_DECISION and observation.decision_proposal is None:
                         observation.decision_proposal = self._application_decision(context)
                     self._check_success(task.success_condition.kind, observation, verification, context)
@@ -284,6 +300,7 @@ class OrchestrationEngine:
 
     def _context(self, project_id: str) -> dict[str, Any]:
         project = self.diligence.get(project_id)
+        self.memory.graph.sync_project(project)
         intelligence = self.diligence.evaluate_evidence_coverage(project_id)
         now = time.time()
         evidence = intelligence.get("evidence_items", [])
@@ -303,8 +320,28 @@ class OrchestrationEngine:
             "metered_operations": copy.deepcopy(project.get("metered_operations", [])),
             "action_decisions": copy.deepcopy(project.get("action_decisions", [])),
             "application_confirmation": False,
+            "memory_context": self.memory.context_builder.build(
+                project_id, str(project.get("request", {}).get("message", "")), "planner"
+            ),
             "now": now,
         }
+
+    async def _task_context(self, run: OrchestrationRun, task: Any, context: dict[str, Any]) -> dict[str, Any]:
+        """Runs inside the existing Temporal advance activity, never workflow code."""
+        prior = [
+            {"task_id": item.task_id, "status": item.status.value, "summary": item.summary[:600]}
+            for item in run.observations[-3:]
+        ]
+        query = " ".join([task.task_type.value, task.rationale, *task.required_inputs, *task.evidence_requirements])
+        document_result = None
+        if self.document_memory is not None and self.task_contexts.needs_documents(task):
+            document_result = await self.document_memory.retrieve(run.project_id, query, limit=3)
+        task_context = self.task_contexts.build(
+            self.diligence.get(run.project_id), task,
+            project_spec=run.project_spec.model_dump(mode="json"), prior_observations=prior,
+            document_result=document_result,
+        )
+        return {**context, "project_spec": task_context["project_spec"], "prior_observations": prior, "task_context": task_context}
 
     @staticmethod
     def _planner_context(context: dict[str, Any]) -> dict[str, Any]:
@@ -345,6 +382,7 @@ class OrchestrationEngine:
                 )}
                 for item in context.get("metered_operations", [])
             ],
+            memory_context=context.get("memory_context", {}),
         )
         return packet.model_dump(mode="json")
 
@@ -443,7 +481,9 @@ class OrchestrationEngine:
             run.accounting.completed_at = run.completed_at
 
 
-def build_project_tool_registry(diligence: DiligenceService, scenarios: ScenarioService) -> PolicyToolRegistry:
+def build_project_tool_registry(
+    diligence: DiligenceService, scenarios: ScenarioService, memory: ProjectMemoryStore | None = None
+) -> PolicyToolRegistry:
     registry = PolicyToolRegistry()
 
     def add(name: str, description: str, properties: dict[str, Any], required: list[str], scopes: set[str], roles: set[AgentRole], handler):
@@ -505,4 +545,32 @@ def build_project_tool_registry(diligence: DiligenceService, scenarios: Scenario
         {AgentRole.SCENARIO},
         compare_scenarios,
     )
+    if memory is not None:
+        graph = memory.graph
+        read_roles = {AgentRole.SITE_INTELLIGENCE, AgentRole.POWER, AgentRole.ENTITLEMENT, AgentRole.VERIFICATION, AgentRole.SCENARIO}
+        add(
+            "memory.search", "Retrieve bounded, provenance-bearing project memory.",
+            {"project_id": {"type": "string"}, "query": {"type": "string"}}, ["project_id", "query"], {"read:project"}, read_roles,
+            lambda args: {"records": graph.find_relevant_memory(args["project_id"], args["query"])},
+        )
+        add(
+            "memory.retrieve_episode", "Retrieve project episodes matching a query.",
+            {"project_id": {"type": "string"}, "query": {"type": "string"}}, ["project_id", "query"], {"read:project"}, read_roles,
+            lambda args: {"episodes": graph.find_project_episodes(args["project_id"], args["query"])},
+        )
+        add(
+            "evidence.find_support", "Find source-backed evidence supporting a claim or requirement.",
+            {"project_id": {"type": "string"}, "claim": {"type": "string"}}, ["project_id", "claim"], {"read:evidence"}, read_roles,
+            lambda args: {"evidence": graph.find_supporting_evidence(args["project_id"], args["claim"])},
+        )
+        add(
+            "evidence.trace_claim", "Trace structured claims for one canonical requirement.",
+            {"project_id": {"type": "string"}, "requirement_id": {"type": "string"}}, ["project_id", "requirement_id"], {"read:evidence"}, read_roles,
+            lambda args: {"claims": graph.find_claims_for_requirement(args["project_id"], args["requirement_id"])},
+        )
+        add(
+            "evidence.find_conflicts", "Find unresolved contradictory claims for one canonical requirement.",
+            {"project_id": {"type": "string"}, "requirement_id": {"type": "string"}}, ["project_id", "requirement_id"], {"read:evidence"}, read_roles,
+            lambda args: {"claims": graph.find_conflicts(args["project_id"], args["requirement_id"])},
+        )
     return registry

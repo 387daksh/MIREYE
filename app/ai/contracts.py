@@ -7,6 +7,12 @@ class ModelProvider(Protocol):
     async def generate(self, request: dict[str, Any]) -> dict[str, Any]: ...
 
 
+class EmbeddingProvider(Protocol):
+    """Retrieval-only model surface; embeddings never establish project truth."""
+
+    async def embed(self, texts: list[str]) -> dict[str, Any]: ...
+
+
 class AgentRuntime(Protocol):
     async def run(self, state: dict[str, Any], message: str) -> dict[str, Any]: ...
 

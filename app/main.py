@@ -37,9 +37,9 @@ from app.infrastructure.db import workspace_store_for
 from app.infrastructure.observability import configure_observability, install_http_observability
 from app.infrastructure.storage import artifact_store_for
 from app.ai.evaluation import VerificationEngine
-from app.ai.memory import ProjectMemoryStore
+from app.ai.memory import DocumentMemoryService, EvidenceGraphRetriever, ProjectMemoryStore
 from app.ai.planners import IntentInterpreter, TaskGraphPlanner
-from app.ai.providers import OpenAIStructuredModelProvider
+from app.ai.providers import OpenAIEmbeddingProvider, OpenAIStructuredModelProvider
 from app.ai.runtime import OrchestrationEngine, OrchestrationError, build_project_tool_registry
 from app.ai.schemas.orchestration import OrchestrationRun
 from app.application.orchestration.temporal import TemporalOrchestrationExecutor
@@ -119,14 +119,18 @@ sandbox_service = SiteSnapshotService(store=workspace_store, client=mireye_clien
 diligence_service = DiligenceService(workspace_store, sandbox_service, world_service, sources=AuthoritativeSourceService())
 sandbox_agent = SandboxAgent(scenarios=scenario_service, intelligence=sandbox_service, diligence=diligence_service)
 orchestration_model = OpenAIStructuredModelProvider()
-orchestration_tools = build_project_tool_registry(diligence_service, scenario_service)
+project_memory = ProjectMemoryStore(workspace_store)
+evidence_graph = EvidenceGraphRetriever(workspace_store)
+document_memory = DocumentMemoryService(evidence_graph.graph, artifact_store, OpenAIEmbeddingProvider())
+orchestration_tools = build_project_tool_registry(diligence_service, scenario_service, project_memory)
 orchestration_engine = OrchestrationEngine(
     diligence_service,
     IntentInterpreter(orchestration_model),
     TaskGraphPlanner(orchestration_model),
     orchestration_tools,
-    ProjectMemoryStore(workspace_store),
+    project_memory,
     VerificationEngine(),
+    document_memory,
 )
 product_service = ProductExperienceService(sandbox_service, world_service)
 spatial_discovery = SpatialDiscovery()
@@ -604,6 +608,35 @@ async def get_diligence_project_intelligence(project_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.get("/v1/diligence/projects/{project_id}/memory/search")
+async def search_project_memory(
+    project_id: str, query: str = Query(min_length=1, max_length=1000), limit: int = Query(default=12, ge=1, le=50), as_of: float | None = Query(default=None),
+    context: RequestContext = Depends(request_context),
+):
+    """Hybrid structured/semantic recall that always returns provenance references."""
+    try:
+        require_orchestration_workspace(project_id, context, "project:read")
+        result = await document_memory.retrieve(project_id, query, limit=limit, as_of=as_of)
+        return {"project_id": project_id, "records": result["graph_records"], "documents": result["document_chunks"], "vector_queries": result["vector_queries"], "as_of": as_of}
+    except (DiligenceError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/v1/diligence/projects/{project_id}/memory/requirements/{requirement_id}")
+async def trace_project_claim(
+    project_id: str, requirement_id: str, as_of: float | None = Query(default=None),
+    context: RequestContext = Depends(request_context),
+):
+    try:
+        require_orchestration_workspace(project_id, context, "evidence:read")
+        claims = evidence_graph.find_claims_for_requirement(project_id, requirement_id, as_of=as_of)
+        return {"project_id": project_id, "requirement_id": requirement_id, "claims": claims, "evidence": [
+            item for claim in claims for item in evidence_graph.find_supporting_evidence(project_id, claim["claim_id"])
+        ]}
+    except (DiligenceError, ValueError) as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
 @app.get("/v1/diligence/projects/{project_id}/evidence-plan")
 async def get_diligence_project_evidence_plan(project_id: str):
     try:
@@ -716,6 +749,11 @@ async def resume_orchestration_run(project_id: str, run_id: str, context: Reques
     try:
         require_orchestration_workspace(project_id, context, "orchestration:run")
         if temporal_executor:
+            run = orchestration_engine.get_run(project_id, run_id)
+            if run.status != "WAITING_FOR_DECISION":
+                raise OrchestrationError("Only a run waiting for a user decision can resume.")
+            if diligence_service.get(project_id).get("active_decision"):
+                raise OrchestrationError("The active user decision must be answered before resume.")
             await temporal_executor.signal_decision(run_id)
             return {"run_id": run_id, "status": "RESUMED"}
         return await orchestration_engine.resume(project_id, run_id)

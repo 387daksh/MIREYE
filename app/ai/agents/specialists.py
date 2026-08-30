@@ -128,7 +128,7 @@ def _scoped_context(role: AgentRole, task: TaskNode, context: dict[str, Any]) ->
         evidence_items=[
             {key: item.get(key) for key in (
                 "evidence_id", "status", "scope", "provider", "source", "unit", "semantic_strength",
-                "semantic_class", "claim_limits", "observed_at", "expires_at", "human_review_required",
+                "semantic_class", "observed_at", "expires_at", "human_review_required",
             )}
             for item in context.get("evidence_items", []) if item.get("evidence_id") in evidence_ids
         ],
@@ -152,6 +152,10 @@ def _scoped_context(role: AgentRole, task: TaskNode, context: dict[str, Any]) ->
             for item in context.get("action_decisions", [])
             if item.get("gap_id") in {gap.get("gap_id") for gap in gaps}
         ],
+        site_identity=context.get("task_context", {}).get("site_identity", {}),
+        retrieval_context=context.get("task_context", {}).get("retrieval_context", {}),
+        context_selection=context.get("task_context", {}).get("context_selection", {}),
+        memory_context=context.get("task_context", {}).get("memory_context", context.get("memory_context", {})),
     )
     return packet.model_dump(mode="json")
 

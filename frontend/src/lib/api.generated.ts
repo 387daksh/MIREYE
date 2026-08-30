@@ -450,6 +450,43 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/diligence/projects/{project_id}/memory/requirements/{requirement_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Trace Project Claim */
+        get: operations["trace_project_claim_v1_diligence_projects__project_id__memory_requirements__requirement_id__get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/diligence/projects/{project_id}/memory/search": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Search Project Memory
+         * @description Hybrid structured/semantic recall that always returns provenance references.
+         */
+        get: operations["search_project_memory_v1_diligence_projects__project_id__memory_search_get"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/diligence/projects/{project_id}/next-actions": {
         parameters: {
             query?: never;
@@ -2819,6 +2856,75 @@ export interface operations {
     get_diligence_project_intelligence_v1_diligence_projects__project_id__intelligence_get: {
         parameters: {
             query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    trace_project_claim_v1_diligence_projects__project_id__memory_requirements__requirement_id__get: {
+        parameters: {
+            query?: {
+                as_of?: number | null;
+            };
+            header?: never;
+            path: {
+                project_id: string;
+                requirement_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    search_project_memory_v1_diligence_projects__project_id__memory_search_get: {
+        parameters: {
+            query: {
+                query: string;
+                limit?: number;
+                as_of?: number | null;
+            };
             header?: never;
             path: {
                 project_id: string;
