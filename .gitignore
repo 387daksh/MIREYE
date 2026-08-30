@@ -15,3 +15,6 @@ dist/
 build/
 *.egg-info/
 .minio/
+
+# Local Claude Code skill installs (third-party tooling, not project code)
+.claude/skills/
