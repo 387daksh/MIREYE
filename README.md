@@ -1,24 +1,51 @@
-# MIREYE Site Intelligence and Sandbox
+# MIREYE
 
-MIREYE is an evidence-grounded site-diligence and conceptual-development platform. It accepts customer-supplied addresses, coordinates, and supported APNs; resolves and enriches those candidates through MIREYE; evaluates supported constraints deterministically; and presents a selected parcel in a terrain and road-aware sandbox.
+MIREYE is an evidence-grounded site-diligence workspace for battery energy storage systems and other physical projects. A user supplies a project brief and candidate addresses, coordinates, or supported APNs. MIREYE resolves the sites, retrieves parcel and infrastructure evidence, evaluates supported requirements deterministically, and turns the remaining gaps into actionable evidence requests.
 
-The product is deliberately conservative about what evidence proves. MIREYE distinguishes provider observations, deterministic calculations, user or agent proposals, and future generated media. It does not claim that a conceptual layout is engineering design, that proximity proves utility capacity, or that a point observation proves a parcel-wide condition.
+The platform is deliberately conservative about what evidence proves. Nearby transmission is not available capacity, mapped roads are not legal access, and conceptual geometry is not engineering design. Unsupported conclusions stay explicit instead of being converted into confident AI claims.
 
-![MIREYE request experience](docs/screenshots/mireye-home.png)
+![MIREYE BESS project workspace](docs/screenshots/mireye-bess-workspace.png)
 
-![MIREYE site sandbox](docs/screenshots/mireye-sandbox.png)
+_BESS project workspace showing the evidence-gated map, readiness domains, and critical blockers before authoritative enrichment._
 
-## Current product surface
+## What users can do
+
+- Create a project from a natural-language brief and one or more supplied candidate sites.
+- Inspect parcel, terrain, roads, buildings, water, land cover, infrastructure, and evidence provenance.
+- Ask the project assistant why a requirement is blocked and receive a source-grounded answer.
+- Add project knowledge, studies, emails, notes, providers, and source URLs to durable project memory.
+- Review deterministic readiness across land, flood, power, entitlement, water, and access.
+- Generate, edit, approve, manually send, and record responses to requests for information (RFIs).
+- Create and compare conceptual BESS layouts without presenting them as construction designs.
+
+![MIREYE readiness and blockers](docs/screenshots/mireye-bess-readiness.png)
+
+_The sidebar separates observed facts, derived readiness, unresolved requirements, and recommended next actions._
+
+## End-to-end workflow
 
 The primary workflow is supplied-candidate diligence:
 
-1. A user submits a project brief and candidate locations.
-2. The application compiles typed constraints and reports unsupported semantics as unresolved.
-3. Candidates are resolved and an exact MIREYE field and credit plan is shown.
+1. The user describes the project, capacity, duration, constraints, and candidate locations.
+2. The application compiles typed requirements and asks for clarification instead of silently choosing an ambiguous address.
+3. MIREYE resolves each candidate and prepares an exact field and credit plan.
 4. The user explicitly confirms paid enrichment.
-5. The application stores immutable site snapshots, evaluates supported predicates, and ranks candidates.
-6. A selected site can be opened with USGS terrain, Overture roads, source evidence, and a conceptual proposed-development scene.
-7. The user or constrained agent can create, evaluate, branch, and compare scenario revisions.
+5. Provider observations and public-source context are stored as immutable site snapshots with provenance and freshness.
+6. Deterministic evaluators produce `PASS`, `FAIL`, `UNRESOLVED`, or `NOT ASSESSED`; the language model cannot change those outcomes.
+7. The project rail shows readiness, blockers, evidence strength, source coverage, changes, and ranked next actions.
+8. The user can add their own evidence. It remains `PENDING_REVIEW` until source and scope are checked.
+9. The assistant can prepare an RFI for a validated evidence gap. The user edits and approves it, sends it through an approved external channel, records delivery, and captures the response.
+10. A selected site can be explored with USGS terrain, Overture physical context, and deterministic scenario comparisons.
+
+RFI lifecycle:
+
+```text
+DRAFT -> APPROVED -> SENT -> RESPONSE_RECEIVED -> PENDING_REVIEW
+```
+
+MIREYE does not send external messages automatically. Human approval and manual delivery remain explicit boundaries.
+
+## Product and compatibility surfaces
 
 The application also contains compatibility and prototype surfaces:
 
@@ -31,6 +58,8 @@ The application also contains compatibility and prototype surfaces:
 
 ## Evidence and safety model
 
+### Provenance
+
 | Label | Meaning | Authority |
 | --- | --- | --- |
 | `OBSERVED` | MIREYE or source-backed parcel facts and geometry | Authoritative input for supported calculations |
@@ -38,7 +67,18 @@ The application also contains compatibility and prototype surfaces:
 | `PROPOSED` | User- or agent-requested conceptual objects | Scenario state only |
 | `GENERATED` | Reserved for future generated visual output | Never authoritative |
 
-The model plans and explains; typed tools perform mutations; the deterministic evaluator decides `PASS`, `FAIL`, or `UNRESOLVED`. A mutation is only reported after validation and persistence. An alternative layout requires changed proposal state plus a new deterministic evaluation.
+### Assessment states
+
+| State | Meaning |
+| --- | --- |
+| `PASS` / `VERIFIED` | Current evidence supports the defined requirement. |
+| `FAIL` / `BLOCKED` | Current authoritative evidence contradicts a hard requirement. |
+| `PARTIAL` | Some relevant evidence exists, but the requirement is not decision-ready. |
+| `UNRESOLVED` | The requirement was evaluated, but the available evidence cannot prove it. |
+| `NOT ASSESSED` | No applicable evaluation has been completed yet. |
+| `PENDING_REVIEW` | User-supplied evidence is stored but has not passed source and scope review. |
+
+The model plans and explains; typed tools perform mutations; the deterministic evaluator owns readiness outcomes. A mutation is only reported after validation and persistence. An alternative layout requires changed proposal state plus a new deterministic evaluation.
 
 Paid provider operations are confirmation-gated. The model cannot create a confirmation identifier or spend credits silently. Provider observations and parcel geometry are retained as immutable snapshot records; refreshes create new snapshots rather than overwriting history.
 
@@ -56,6 +96,8 @@ Project request + supplied candidates
     -> selected site and WorldSnapshot
     -> MapLibre sandbox
     -> constrained agent tools
+    -> user evidence and durable project memory
+    -> ranked evidence gaps and controlled RFI lifecycle
     -> persistent scenario revisions and comparisons
     -> freshness check and confirmed refresh
 ```
@@ -165,8 +207,10 @@ npm run generate:api
 The base Compose file runs the API, Next.js frontend, Temporal worker, event publisher, event consumer, PostgreSQL, Redis, NATS JetStream, Temporal, Temporal UI, and MinIO. The API uses PostgreSQL, S3-compatible artifacts, and Temporal in this configuration.
 
 ```powershell
-docker compose -f docker-compose.yml -f docker-compose.dev.yml up --build
+docker compose -p mireye-demo up -d --build
 ```
+
+Open `http://localhost:3000`. Use `docker compose -p mireye-demo ps` to verify service health.
 
 Endpoints and local service ports include:
 
@@ -243,7 +287,8 @@ MIREYE proximity fields are screening evidence, not capacity proof. Overture roa
 | --- | --- |
 | Product intake | `/v1/product/requests`, `/select`, `/confirm` |
 | Candidate diligence | `/v1/diligence/projects/...` |
-| Project memory and evidence | `/v1/diligence/projects/{project_id}/memory/search`, evidence-plan, intelligence, RFI, and next-actions routes |
+| Project memory and evidence | `/v1/diligence/projects/{project_id}/memory/search`, evidence-plan, intelligence, user-evidence, and next-actions routes |
+| RFI lifecycle | `/v1/diligence/projects/{project_id}/rfis`, edit, approve, sent, and response routes |
 | AI orchestration | `/v1/ai/projects/{project_id}/orchestrate`, status, resume, and event stream |
 | Site lifecycle | `/v1/sandbox/site/resolve`, quote, snapshots, freshness, refresh, and evaluate |
 | World lifecycle | `/v1/sandbox/world-snapshots`, terrain tiles, roads, and layers |
@@ -300,6 +345,8 @@ python scripts/live_mireye_demo.py
 
 Container-dependent checks are marked `runtime` and require the actual PostgreSQL, Redis, NATS, Temporal, and MinIO stack. Live provider checks and browser-active behavior must be reported separately from offline/unit results.
 
+Current checkout verification on 2026-09-01: 288 backend tests passed, 9 frontend tests passed, TypeScript typecheck/lint/build passed, and all 11 Compose services reported healthy. This is local and container integration evidence, not a production deployment claim.
+
 ## Known limits and roadmap boundary
 
 - Candidate enumeration is customer-supplied; no public statewide inverse-search capability is assumed.
@@ -308,6 +355,7 @@ Container-dependent checks are marked `runtime` and require the actual PostgreSQ
 - Terrain may fall back from bounded 1 m acquisition to real 10 m USGS coverage.
 - Proposed facilities are conceptual rectangular extrusions, not construction models.
 - Chat sessions are process-local even though accepted scenarios and project state are durable.
+- RFI delivery is manual: MIREYE records draft, approval, delivery, and response state but does not send external email or submit utility portals.
 - Continuous watch scheduling is deferred; watch state and explicit check-now are available.
 - PostgreSQL, S3, Temporal, NATS, Redis, and the Next.js frontend are implemented paths in the repository, but deployment readiness still requires environment-specific integration and operational validation.
 
