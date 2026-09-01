@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from pathlib import Path
 from typing import Any
 
@@ -87,6 +88,13 @@ class MireyeClient:
         with span("provider.mireye", **{"provider.name": "MIREYE", "http.request.method": method, "url.path": path}):
             async with httpx.AsyncClient(timeout=self.timeout) as client:
                 resp = await client.request(method, url, json=json_body, params=params, headers=headers)
+                capture_path = os.environ.get("MIREYE_FETCH_BATCH_CAPTURE_PATH")
+                if path == "/v1/fetch/batch" and capture_path:
+                    raw_body = resp.text.replace(self.api_key, "[REDACTED]") if self.api_key else resp.text
+                    try:
+                        Path(capture_path).write_text(raw_body, encoding="utf-8")
+                    except OSError:
+                        logger.exception("Could not persist the MIREYE fetch_batch response capture.")
                 resp.raise_for_status()
                 body = resp.json()
         charged = body.get("credits_charged") or (body.get("usage") or {}).get("credits_charged")

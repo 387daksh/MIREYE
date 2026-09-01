@@ -1,5 +1,7 @@
 import asyncio
 
+from redis.exceptions import ConnectionError as RedisConnectionError
+
 from app.infrastructure.cache import RedisCache
 
 
@@ -44,5 +46,21 @@ def test_cache_has_explicit_ttl_and_invalidation():
         await cache.invalidate("catalog")
         assert await cache.get_or_set("catalog", 60, load) == {"real": True}
         assert calls == 2
+
+    asyncio.run(check())
+
+
+def test_cache_falls_back_to_loader_when_redis_is_down():
+    class UnavailableRedis(FakeRedis):
+        async def get(self, key):
+            raise RedisConnectionError("redis unavailable")
+
+    async def check():
+        cache = RedisCache("redis://unused", client=UnavailableRedis())
+
+        async def load():
+            return {"real": True}
+
+        assert await cache.get_or_set("catalog", 3600, load) == {"real": True}
 
     asyncio.run(check())

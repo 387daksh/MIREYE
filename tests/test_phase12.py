@@ -138,10 +138,17 @@ def test_entitlement_preserves_zoning_as_fact_not_legal_conclusion_and_builds_de
 def test_authoritative_document_adapter_preserves_citations_and_provenance():
     def handler(request: httpx.Request) -> httpx.Response:
         url = str(request.url)
+        if "EXTERNAL_tcad_parcel" in url:
+            return httpx.Response(200, json={"type": "FeatureCollection", "features": [{
+                "type": "Feature", "properties": {"PROP_ID": 292257, "PID_10": "0315410104", "SITUS": None, "ZONING": None, "Shape__Area": 74005986.822265625},
+                "geometry": {"type": "Polygon", "coordinates": [[[-97.61, 30.22], [-97.60, 30.22], [-97.60, 30.23], [-97.61, 30.22]]]},
+            }]})
         if "BOUNDARIES_jurisdictions" in url:
             return httpx.Response(200, json={"features": [{"attributes": {"CITY_NAME": "AUSTIN", "JURISDICTION_TYPE_SPECIFICS": "FULL PURPOSE"}}]})
         if "DDB_Phase_1" in url:
             return httpx.Response(200, json={"features": [{"attributes": {"ZONING_BASE": "LI", "ZONING_FULL": "LI"}}]})
+        if "txdot.gov" in url:
+            return httpx.Response(200, text="<html><body>No work may begin until a fully executed driveway permit has been received.</body></html>")
         return httpx.Response(200, text="<html><body>A Basic Development Permit is required for land development outside municipal corporate boundaries.</body></html>")
 
     client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
@@ -150,7 +157,10 @@ def test_authoritative_document_adapter_preserves_citations_and_provenance():
     result = run(source.collect({"project_id": "project-1"}, snapshot))
     run(client.aclose())
     records = {item["field"]: item for item in result["records"]}
-    assert {"austin_jurisdiction", "austin_base_zoning", "travis_county_development_permit_context"} <= set(records)
+    assert {"tcad_parcel_identity", "parcel_boundary_geojson", "parcel_area_m2", "austin_jurisdiction", "austin_base_zoning", "travis_county_development_permit_context", "txdot_driveway_permit_context"} <= set(records)
+    assert records["parcel_area_m2"]["value"] == 6875381.154
+    assert records["parcel_boundary_geojson"]["value"]["type"] == "Polygon"
+    assert next(item for item in result["sources"] if item["dataset"] == "Travis Central Appraisal District parcels")["missing_attributes"] == ["SITUS", "ZONING"]
     assert next(item for item in result["sources"] if item["dataset"] == "BESS export / injection interconnection pathway")["availability"] == "UNRESOLVED"
     assert records["austin_base_zoning"]["document_type"] == "official_gis"
     assert "energy_storage_entitlement" in records["austin_base_zoning"]["requirement_ids"]

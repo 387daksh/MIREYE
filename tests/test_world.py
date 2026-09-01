@@ -24,6 +24,7 @@ from app.world import (
     WorldSnapshotService,
     _canonical,
     _npy_bytes,
+    _overture_paths,
     _tile_xy,
     as_geoparquet,
     encode_terrain_rgb,
@@ -182,6 +183,59 @@ def test_world_snapshot_adds_real_context_layers_with_provenance(tmp_path):
     assert layers["transmission"]["availability"] == "UNAVAILABLE"
     assert all(entry["artifact_hashes"] for entry in world["source_manifest"] if entry["layer"] != "transmission")
     assert all(entry["acquired_at"] == public["created_at"] for entry in public["source_manifest"])
+
+
+def test_world_snapshot_retries_unavailable_overture_layer(tmp_path):
+    _, site, service = world_service(tmp_path)
+    fixture = FixturePolygonProvider("buildings")
+
+    class RecoveringProvider:
+        calls = 0
+
+        async def build(self, aoi, artifacts, options):
+            self.calls += 1
+            if self.calls == 1:
+                raise WorldError("temporary Overture outage")
+            return await fixture.build(aoi, artifacts, options)
+
+    service.building_provider = RecoveringProvider()
+    first = run(service.create(site_snapshot_id=site["snapshot_id"], requested_layers=["buildings"]))
+    second = run(service.create(site_snapshot_id=site["snapshot_id"], requested_layers=["buildings"]))
+
+    assert first["layers"][0]["availability"] == "UNAVAILABLE"
+    assert second["layers"][0]["availability"] == "AVAILABLE"
+    assert service.building_provider.calls == 2
+
+
+def test_overture_paths_uses_spatial_index(monkeypatch):
+    index = pa.Table.from_pylist([
+        {
+            "collection": "building",
+            "type": "Feature",
+            "bbox": {"xmin": -98.0, "ymin": 30.0, "xmax": -97.0, "ymax": 31.0},
+            "assets": {"aws": {"href": "https://example.test/austin.parquet"}},
+        },
+        {
+            "collection": "building",
+            "type": "Feature",
+            "bbox": {"xmin": -80.0, "ymin": 40.0, "xmax": -79.0, "ymax": 41.0},
+            "assets": {"aws": {"href": "https://example.test/elsewhere.parquet"}},
+        },
+    ])
+
+    class Response:
+        content = b"index"
+
+        @staticmethod
+        def raise_for_status():
+            return None
+
+    monkeypatch.setattr("app.world.httpx.get", lambda *_args, **_kwargs: Response())
+    monkeypatch.setattr("app.world.pq.read_table", lambda *_args, **_kwargs: index)
+
+    assert _overture_paths("2026-08-19.0", "building", [-97.7, 30.1, -97.5, 30.3]) == [
+        "https://example.test/austin.parquet"
+    ]
 
 
 def test_dem_encoding_and_road_extraction_are_deterministic():

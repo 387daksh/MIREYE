@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any, cast
 
 from redis.asyncio import Redis
+from redis.exceptions import RedisError
 
 
 class RedisCache:
@@ -20,11 +21,17 @@ class RedisCache:
         await self.client.aclose()
 
     async def get_or_set(self, key: str, ttl_seconds: int, loader: Callable[[], Awaitable[dict[str, Any]]]) -> dict[str, Any]:
-        cached = await self.client.get(key)
+        try:
+            cached = await self.client.get(key)
+        except RedisError:
+            return await loader()
         if cached is not None:
             return json.loads(cached)
         value = await loader()
-        await self.client.set(key, json.dumps(value, sort_keys=True), ex=ttl_seconds)
+        try:
+            await self.client.set(key, json.dumps(value, sort_keys=True), ex=ttl_seconds)
+        except RedisError:
+            pass
         return value
 
     async def invalidate(self, *keys: str) -> int:

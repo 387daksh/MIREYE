@@ -15,7 +15,9 @@ from app.infrastructure.observability import traced_async
 
 AUSTIN_JURISDICTION_URL = "https://services.arcgis.com/0L95CJ0VTaxqcmED/arcgis/rest/services/BOUNDARIES_jurisdictions/FeatureServer/0/query"
 AUSTIN_ZONING_URL = "https://services.arcgis.com/0L95CJ0VTaxqcmED/ArcGIS/rest/services/DDB_Phase_1_Web_Layers/FeatureServer/5/query"
+AUSTIN_TCAD_URL = "https://services.arcgis.com/0L95CJ0VTaxqcmED/ArcGIS/rest/services/EXTERNAL_tcad_parcel/FeatureServer/0/query"
 TRAVIS_DEVELOPMENT_URL = "https://www.traviscountytx.gov/tnr/environmental-quality/stormwater/professionals/environmental-review-faqs"
+TXDOT_DRIVEWAY_URL = "https://www.txdot.gov/content/txdotoms/us/en/manuals/des/acm/chapter-2--access-management-standards/section-4--driveway-permits--design--and-materials.html"
 READINESS_SCHEMA_VERSION = "project_readiness_v1"
 
 
@@ -57,6 +59,7 @@ def _record(
     document_title: str | None = None, document_type: str | None = None,
     section_reference: str | None = None, excerpt: str | None = None,
     jurisdiction: str | None = None, confidence: str = "HIGH", human_review_required: bool = True,
+    unit: str | None = None,
 ) -> dict:
     payload = {
         "field": field, "value": value, "provider": provider, "dataset": dataset,
@@ -68,7 +71,7 @@ def _record(
     return {
         "evidence_id": _stable_id("external_evidence", site_id, payload),
         **payload,
-        "status": "ok", "source": provider, "unit": None,
+        "status": "ok", "source": provider, "unit": unit,
         "retrieved_at": retrieved_at, "observed_at": retrieved_at,
         "expires_at": retrieved_at + 86400, "freshness": "CURRENT",
         "confidence": confidence, "human_review_required": human_review_required,
@@ -90,6 +93,7 @@ class AuthoritativeSourceService:
         evidence = snapshot.get("evidence", {})
         iso = (evidence.get("iso_rto") or {}).get("value")
         county = str((evidence.get("political_county") or {}).get("value") or "")
+        region = str((evidence.get("political_region") or {}).get("value") or "")
         collected_at = time.time()
         records: list[dict] = []
         sources: list[dict] = []
@@ -102,18 +106,78 @@ class AuthoritativeSourceService:
                 "availability": "UNRESOLVED",
                 "reason": "No approved generation or storage interconnection source is configured.",
             })
+            tcad_match = False
             if isinstance(lat, (int, float)) and isinstance(lng, (int, float)):
+                tcad_match = await self._tcad_parcel(client, site_id, float(lat), float(lng), collected_at, records, sources)
                 await self._austin_layers(client, site_id, float(lat), float(lng), collected_at, records, sources)
             else:
                 sources.append({"provider": "City of Austin", "dataset": "Jurisdiction and zoning GIS", "availability": "UNAVAILABLE", "reason": "The SiteSnapshot has no validated resolution point."})
-            if "travis" in county.casefold():
+            if "travis" in county.casefold() or tcad_match:
                 await self._travis(client, site_id, collected_at, records, sources)
             else:
                 sources.append({"provider": "Travis County", "dataset": "Development requirements", "source_url": TRAVIS_DEVELOPMENT_URL, "availability": "NOT_APPLICABLE_OR_UNCONFIRMED", "reason": "MIREYE evidence does not identify Travis County."})
+            if "travis" in county.casefold() or region.casefold() in {"tx", "texas"} or tcad_match:
+                await self._txdot(client, site_id, collected_at, records, sources)
         finally:
             if owns_client:
                 await client.aclose()
         return {"site_id": site_id, "collected_at": collected_at, "records": records, "sources": sources}
+
+    async def _tcad_parcel(self, client: httpx.AsyncClient, site_id: str, lat: float, lng: float, now: float, records: list[dict], sources: list[dict]) -> bool:
+        params = {
+            "geometry": f"{lng},{lat}", "geometryType": "esriGeometryPoint", "inSR": 4326,
+            "spatialRel": "esriSpatialRelIntersects", "outFields": "PROP_ID,PID_10,SITUS,ZONING,Shape__Area",
+            "returnGeometry": "true", "outSR": 4326, "f": "geojson",
+        }
+        query_url = f"{AUSTIN_TCAD_URL}?{urlencode(params)}"
+        provider, dataset = "TCAD via City of Austin", "Travis Central Appraisal District parcels"
+        try:
+            response = await client.get(AUSTIN_TCAD_URL, params=params)
+            response.raise_for_status()
+            payload = response.json()
+            if payload.get("error"):
+                raise ValueError(str(payload["error"].get("message") or payload["error"]))
+            features = payload.get("features") or []
+            if not features:
+                sources.append({"provider": provider, "dataset": dataset, "source_url": query_url, "availability": "NO_INTERSECTING_FEATURE", "reason": "The official parcel layer returned no feature at the MIREYE resolution point.", "retrieved_at": now})
+                return False
+            feature = features[0]
+            attributes, geometry = feature.get("properties") or {}, feature.get("geometry")
+            records.append(_record(
+                site_id=site_id, field="tcad_parcel_identity", value={key.casefold(): attributes.get(key) for key in ("PROP_ID", "PID_10", "SITUS")},
+                provider=provider, dataset=dataset, source_url=query_url, scope="POINT_IN_PARCEL", semantic_strength="DIRECTLY_VERIFIED",
+                requirement_ids=[], retrieved_at=now, document_title=dataset, document_type="official_gis",
+                section_reference="Intersecting TCAD parcel identifiers", jurisdiction="Travis County, Texas",
+            ))
+            if isinstance(geometry, dict) and geometry.get("type") in {"Polygon", "MultiPolygon"}:
+                records.append(_record(
+                    site_id=site_id, field="parcel_boundary_geojson", value=geometry, provider=provider, dataset=dataset,
+                    source_url=query_url, scope="PARCEL", semantic_strength="DIRECTLY_VERIFIED", requirement_ids=["footprint_inside_parcel"],
+                    retrieved_at=now, document_title=dataset, document_type="official_gis",
+                    section_reference="Intersecting parcel polygon in EPSG:4326", jurisdiction="Travis County, Texas",
+                ))
+            area_sqft = attributes.get("Shape__Area")
+            if isinstance(area_sqft, (int, float)) and area_sqft > 0:
+                records.append(_record(
+                    site_id=site_id, field="parcel_area_m2", value=round(float(area_sqft) * 0.09290304, 3), provider=provider,
+                    dataset=dataset, source_url=query_url, scope="PARCEL", semantic_strength="DIRECTLY_VERIFIED",
+                    requirement_ids=["parcel_acreage_range"], retrieved_at=now, document_title=dataset, document_type="official_gis",
+                    section_reference="Shape__Area converted from square feet to square metres", jurisdiction="Travis County, Texas", unit="m2",
+                ))
+            zoning = attributes.get("ZONING")
+            if isinstance(zoning, str) and zoning.strip():
+                records.append(_record(
+                    site_id=site_id, field="parcel_zoning", value=zoning.strip(), provider=provider, dataset=dataset, source_url=query_url,
+                    scope="PARCEL", semantic_strength="SOURCE_BACKED_SIGNAL", requirement_ids=["parcel_zoning_code_in", "industrial_zoning"],
+                    retrieved_at=now, document_title=dataset, document_type="official_gis", section_reference="TCAD parcel ZONING attribute",
+                    jurisdiction="Travis County, Texas",
+                ))
+            missing = [key for key in ("SITUS", "ZONING") if attributes.get(key) in {None, ""}]
+            sources.append({"provider": provider, "dataset": dataset, "source_url": query_url, "availability": "AVAILABLE", "missing_attributes": missing, "retrieved_at": now})
+            return True
+        except (httpx.HTTPError, ValueError, TypeError) as exc:
+            sources.append({"provider": provider, "dataset": dataset, "source_url": query_url, "availability": "UNAVAILABLE", "reason": str(exc), "retrieved_at": now})
+            return False
 
     async def _austin_layers(self, client: httpx.AsyncClient, site_id: str, lat: float, lng: float, now: float, records: list[dict], sources: list[dict]) -> None:
         params = {
@@ -169,6 +233,26 @@ class AuthoritativeSourceService:
             sources.append({"provider": "Travis County", "dataset": "Environmental Review of Development Proposals", "source_url": TRAVIS_DEVELOPMENT_URL, "availability": "AVAILABLE", "retrieved_at": now})
         except (httpx.HTTPError, ValueError) as exc:
             sources.append({"provider": "Travis County", "dataset": "Environmental Review of Development Proposals", "source_url": TRAVIS_DEVELOPMENT_URL, "availability": "UNAVAILABLE", "reason": str(exc), "retrieved_at": now})
+
+    async def _txdot(self, client: httpx.AsyncClient, site_id: str, now: float, records: list[dict], sources: list[dict]) -> None:
+        dataset = "Access Management Manual - driveway permits"
+        try:
+            response = await client.get(TXDOT_DRIVEWAY_URL)
+            response.raise_for_status()
+            excerpt = _excerpt(_html_text(response.text), "fully executed driveway permit")
+            if not excerpt:
+                raise ValueError("The current page did not expose the driveway-permit text.")
+            records.append(_record(
+                site_id=site_id, field="txdot_driveway_permit_context",
+                value={"permit_required_on_state_right_of_way": True, "site_applicability": "REQUIRES_ROAD_OWNERSHIP_CONFIRMATION"},
+                provider="TxDOT", dataset=dataset, source_url=TXDOT_DRIVEWAY_URL, scope="STATE_RULE_CONTEXT",
+                semantic_strength="SOURCE_BACKED_SIGNAL", requirement_ids=["legal_access"], retrieved_at=now,
+                document_title=dataset, document_type="official_guidance", section_reference="Permits", excerpt=excerpt,
+                jurisdiction="Texas", human_review_required=True,
+            ))
+            sources.append({"provider": "TxDOT", "dataset": dataset, "source_url": TXDOT_DRIVEWAY_URL, "availability": "AVAILABLE", "retrieved_at": now})
+        except (httpx.HTTPError, ValueError) as exc:
+            sources.append({"provider": "TxDOT", "dataset": dataset, "source_url": TXDOT_DRIVEWAY_URL, "availability": "UNAVAILABLE", "reason": str(exc), "retrieved_at": now})
 
 
 def _usable(record: Any, now: float) -> bool:
@@ -279,7 +363,7 @@ def build_entitlement_state(project: dict, candidate: dict, snapshot: dict, inte
     evaluated_at = time.time() if now is None else float(now)
     external_records = (external or {}).get("records", [])
     jurisdiction = next((item for item in external_records if item.get("field") == "austin_jurisdiction" and _usable(item, evaluated_at)), None)
-    external_zoning = next((item for item in external_records if item.get("field") == "austin_base_zoning" and _usable(item, evaluated_at)), None)
+    external_zoning = next((item for item in external_records if item.get("field") in {"austin_base_zoning", "parcel_zoning"} and _usable(item, evaluated_at)), None)
     county_path = next((item for item in external_records if item.get("field") == "travis_county_development_permit_context" and _usable(item, evaluated_at)), None)
     zoning = _item(snapshot, "zoning_code", "Raw zoning code", ["parcel_zoning"], now=evaluated_at, limitation="A raw code does not establish a permitted energy-storage use or legal entitlement.")
     if zoning["state"] == "UNRESOLVED" and external_zoning:

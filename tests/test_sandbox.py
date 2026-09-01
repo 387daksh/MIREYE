@@ -23,6 +23,38 @@ def _run(coro):
     return asyncio.run(coro)
 
 
+@pytest.mark.parametrize("status_code", [200, 500])
+def test_fetch_batch_captures_unparsed_response_before_success_or_failure(monkeypatch, tmp_path, status_code):
+    raw_body = '{"results":[],"echo":"test-key"}'
+    capture_path = tmp_path / "fetch-batch-response.json"
+
+    class FakeAsyncClient:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            pass
+
+        async def request(self, method, url, **_kwargs):
+            return httpx.Response(status_code, content=raw_body, request=httpx.Request(method, url))
+
+    monkeypatch.setenv("MIREYE_FETCH_BATCH_CAPTURE_PATH", str(capture_path))
+    monkeypatch.setattr(httpx, "AsyncClient", FakeAsyncClient)
+    request = MireyeClient(api_key="test-key", mode="live")._request(
+        "POST", "/v1/fetch/batch", json_body={"locations": [{"lat": 1, "lng": 2}]},
+    )
+    if status_code == 200:
+        _run(request)
+    else:
+        with pytest.raises(httpx.HTTPStatusError):
+            _run(request)
+
+    assert capture_path.read_text(encoding="utf-8") == raw_body.replace("test-key", "[REDACTED]")
+
+
 class FakeMireyeClient:
     mode = "live"
     base_url = "https://api.mireye.com"
@@ -256,7 +288,7 @@ def test_fresh_provider_absence_is_unresolved_but_not_requoted(sandbox):
     assert snapshot["evidence"]["parcel_zoning"]["value"] is None
 
 
-def test_bess_intelligence_plan_uses_provider_preset_plus_only_catalog_supplements(sandbox):
+def test_bess_intelligence_plan_ignores_legacy_data_center_preset(sandbox):
     service, client, _store = sandbox
     snapshot = _run(service.create_snapshot(workspace_id="ws-1", lat=32.0, lng=-97.0, confirmed=True))
     catalog = client._catalog()
@@ -268,10 +300,10 @@ def test_bess_intelligence_plan_uses_provider_preset_plus_only_catalog_supplemen
     client.meta_fields = lambda: asyncio.sleep(0, result=catalog)
 
     plan = _run(service.project_intelligence_plan(snapshot["snapshot_id"]))
-    spend = _run(service.quote_refresh(snapshot["snapshot_id"], project_profile="data_center_siting"))
+    spend = _run(service.quote_refresh(snapshot["snapshot_id"], project_profile="bess_siting"))
 
-    assert plan["profile"] == "data_center_siting"
-    assert plan["preset_fields"] == ["nearest_power_plant_sector", "slope_degrees"]
+    assert plan["profile"] is None
+    assert plan["preset_fields"] == []
     assert "parcel_owner" in plan["supplemental_fields"]
     assert plan["known_gaps"][0]["requested_field"] == "utility_or_iso_confirmed_export_injection_capacity_mw"
     assert spend["preset"] is None
@@ -281,6 +313,49 @@ def test_bess_intelligence_plan_uses_provider_preset_plus_only_catalog_supplemen
     })
     assert client.quote_calls[-1]["preset"] is None
     assert snapshot["evidence"]["parcel_id"]["source_url"] == "https://example.test/source"
+
+
+def test_refresh_chunks_explicit_fields_without_omitting_any(sandbox):
+    service, client, _store = sandbox
+    snapshot = _run(service.create_snapshot(workspace_id="ws-1", lat=32.0, lng=-97.0, confirmed=True))
+    extra = [f"test_field_{index}" for index in range(55)]
+    catalog = client._catalog()
+    catalog["fields"].extend({"name": name, "source": "TEST", "ttl_seconds": 60} for name in extra)
+
+    async def meta_fields():
+        return catalog
+
+    client.meta_fields = meta_fields
+    client.quote_calls.clear()
+    client.fetch_calls.clear()
+    spend = _run(service.quote_refresh(snapshot["snapshot_id"], fields=extra))
+    requested = set(extra) | {"parcel_id", "parcel_boundary_geojson", "parcel_match_type", "parcel_match_distance_m"}
+
+    assert len(spend["fetch_batches"]) == 2
+    assert all(len(batch["fields"]) <= 50 for batch in spend["fetch_batches"])
+    assert {field for batch in spend["fetch_batches"] for field in batch["fields"]} == requested
+    assert spend["expected_credits"] == 634
+
+    refreshed = _run(service.confirm_and_refresh(spend["spend_plan_id"], confirmed_by_application=True))
+    assert len(client.fetch_calls) == 2
+    assert {field for call in client.fetch_calls for field in call["fields"]} == requested
+    assert refreshed["snapshot"]["parcel_identity"]["parcel_id"] == "parcel-1"
+
+
+def test_evaluate_api_uses_scenario_defaults_for_empty_constraint_list(monkeypatch, sandbox):
+    import app.main as main
+    from fastapi.testclient import TestClient
+
+    service, _client, _store = sandbox
+    snapshot = _run(service.create_snapshot(workspace_id="ws-1", lat=32.0, lng=-97.0, confirmed=True))
+    monkeypatch.setattr(main, "sandbox_service", service)
+    response = TestClient(main.app).post(
+        f"/v1/sandbox/site/{snapshot['snapshot_id']}/evaluate",
+        json={"scene_state": service.scene_state(snapshot["snapshot_id"]), "requested_constraints": []},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["constraint_results"]) == 5
 
 
 def test_live_transport_failure_is_explicit(sandbox):
@@ -360,3 +435,8 @@ def test_sandbox_ui_uses_grounded_world_context_and_decision_oriented_bess():
     assert "sandbox-proposed-surfaces" in script
     assert '"fill-extrusion-color": "#e95920"' not in script
     assert "evidence_ids" not in markup
+    assert 'return "not fetched"' in script
+    assert 'return "provider unavailable"' in script
+    assert 'return "stale"' in script
+    assert '"Not requested"' in script
+    assert '"Source not configured"' in script

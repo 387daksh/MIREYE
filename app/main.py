@@ -41,14 +41,14 @@ from app.ai.memory import DocumentMemoryService, EvidenceGraphRetriever, Project
 from app.ai.planners import IntentInterpreter, TaskGraphPlanner
 from app.ai.providers import OpenAIEmbeddingProvider, OpenAIStructuredModelProvider
 from app.ai.runtime import OrchestrationEngine, OrchestrationError, build_project_tool_registry
-from app.ai.schemas.orchestration import OrchestrationRun
+from app.ai.schemas.orchestration import MemoryKind, OrchestrationRun
 from app.application.orchestration.temporal import TemporalOrchestrationExecutor
 from app.mireye_client import MireyeClient
 from app.product import ProductExperienceService, ProductRequestError
 from app.project_readiness import AuthoritativeSourceService
 from app.sandbox_agent import ModelUnavailableError, SandboxAgent, ToolValidationError
 from app.sandbox_evaluator import SceneValidationError, evaluate_site
-from app.sandbox_scenarios import ScenarioError, ScenarioService
+from app.sandbox_scenarios import DEFAULT_SCENARIO_CONSTRAINTS, ScenarioError, ScenarioService
 from app.sandbox import BESS_SITING_PRESET, ConfirmationRequired, MireyeUnavailableError, ParcelIdentityError, SandboxError, SiteSnapshotService
 from app.workspace.engine import WorkspaceEngine
 from app.world import WorldError, WorldSnapshotService
@@ -371,6 +371,10 @@ class DiligenceEnrichmentConfirmRequest(BaseModel):
     confirmed: bool = False
 
 
+class DiligenceSnapshotLinkRequest(BaseModel):
+    snapshot_id: str = Field(min_length=1, max_length=128)
+
+
 class DiligenceResolutionSelectionRequest(BaseModel):
     option_index: int = Field(ge=0)
 
@@ -410,6 +414,38 @@ class DiligenceChatRequest(BaseModel):
 class DiligenceRfiDraftRequest(BaseModel):
     action_id: str = Field(min_length=1, max_length=128)
     generated_request: str = Field(min_length=40, max_length=8000)
+
+
+class DiligenceRfiUpdateRequest(BaseModel):
+    generated_request: str | None = Field(default=None, min_length=40, max_length=8000)
+    recipient_name: str | None = Field(default=None, max_length=200)
+    recipient_contact: str | None = Field(default=None, max_length=300)
+    internal_notes: str | None = Field(default=None, max_length=2000)
+
+
+class DiligenceRfiApprovalRequest(BaseModel):
+    approved_by: str = Field(min_length=2, max_length=200)
+
+
+class DiligenceRfiSentRequest(BaseModel):
+    sent_by: str = Field(min_length=2, max_length=200)
+    delivery_reference: str | None = Field(default=None, max_length=500)
+
+
+class DiligenceRfiResponseRequest(BaseModel):
+    details: str = Field(min_length=1, max_length=8000)
+    provider: str = Field(min_length=2, max_length=200)
+    source_url: str | None = Field(default=None, max_length=2048)
+    source_type: Literal["document", "email", "study", "note"] = "email"
+
+
+class DiligenceUserEvidenceRequest(BaseModel):
+    requirement_id: str = Field(min_length=1, max_length=128)
+    title: str = Field(min_length=3, max_length=200)
+    details: str = Field(min_length=1, max_length=8000)
+    provider: str = Field(min_length=2, max_length=200)
+    source_url: str | None = Field(default=None, max_length=2048)
+    source_type: Literal["document", "email", "study", "note"] = "document"
 
 
 class AgentDecisionAnswerRequest(BaseModel):
@@ -516,6 +552,14 @@ async def enrich_diligence_project(project_id: str, req: DiligenceEnrichmentConf
 async def select_diligence_candidate_resolution(project_id: str, candidate_id: str, req: DiligenceResolutionSelectionRequest):
     try:
         return await diligence_service.select_resolution(project_id, candidate_id, req.option_index)
+    except (DiligenceError, SandboxError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/candidates/{candidate_id}/snapshot-link")
+async def link_diligence_candidate_snapshot(project_id: str, candidate_id: str, req: DiligenceSnapshotLinkRequest):
+    try:
+        return diligence_service.link_existing_snapshot(project_id, candidate_id, req.snapshot_id)
     except (DiligenceError, SandboxError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -653,6 +697,33 @@ async def refresh_diligence_site_sources(project_id: str, site_id: str):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
+@app.post("/v1/diligence/projects/{project_id}/sites/{site_id}/user-evidence")
+async def add_diligence_user_evidence(
+    project_id: str,
+    site_id: str,
+    req: DiligenceUserEvidenceRequest,
+    context: RequestContext = Depends(request_context),
+):
+    try:
+        require_orchestration_workspace(project_id, context, "project:write")
+        result = diligence_service.add_user_evidence(project_id, site_id, **req.model_dump())
+        evidence = result["evidence"]
+        memory = project_memory.put_record(
+            project_id,
+            MemoryKind.EVIDENCE,
+            evidence,
+            {
+                "source": "user",
+                "provider": evidence["provider"],
+                "source_url": evidence.get("source_url"),
+                "human_review_required": True,
+            },
+        )
+        return {**result, "memory_id": memory.memory_id}
+    except (DiligenceError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/v1/diligence/projects/{project_id}/sites/{site_id}/power-readiness")
 async def get_diligence_power_readiness(project_id: str, site_id: str):
     try:
@@ -682,6 +753,58 @@ async def create_diligence_project_rfi(project_id: str, req: DiligenceRfiDraftRe
     try:
         return diligence_service.create_rfi_draft(project_id, req.action_id, req.generated_request)
     except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/v1/diligence/projects/{project_id}/rfis/{rfi_id}")
+async def update_diligence_project_rfi(project_id: str, rfi_id: str, req: DiligenceRfiUpdateRequest):
+    try:
+        return diligence_service.update_rfi_draft(project_id, rfi_id, **req.model_dump())
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/rfis/{rfi_id}/approve")
+async def approve_diligence_project_rfi(project_id: str, rfi_id: str, req: DiligenceRfiApprovalRequest):
+    try:
+        return diligence_service.approve_rfi(project_id, rfi_id, req.approved_by)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/rfis/{rfi_id}/sent")
+async def mark_diligence_project_rfi_sent(project_id: str, rfi_id: str, req: DiligenceRfiSentRequest):
+    try:
+        return diligence_service.mark_rfi_sent(project_id, rfi_id, req.sent_by, req.delivery_reference)
+    except DiligenceError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/diligence/projects/{project_id}/rfis/{rfi_id}/response")
+async def record_diligence_project_rfi_response(
+    project_id: str,
+    rfi_id: str,
+    req: DiligenceRfiResponseRequest,
+    context: RequestContext = Depends(request_context),
+):
+    try:
+        require_orchestration_workspace(project_id, context, "project:write")
+        result = diligence_service.record_rfi_response(project_id, rfi_id, **req.model_dump())
+        evidence = result["evidence"]
+        memory = project_memory.put_record(
+            project_id,
+            MemoryKind.EVIDENCE,
+            evidence,
+            {
+                "source": "user",
+                "provider": evidence["provider"],
+                "source_url": evidence.get("source_url"),
+                "rfi_id": rfi_id,
+                "human_review_required": True,
+            },
+        )
+        return {**result, "memory_id": memory.memory_id}
+    except (DiligenceError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
@@ -964,7 +1087,7 @@ async def evaluate_sandbox_site(snapshot_id: str, req: SandboxEvaluationRequest)
     if snapshot is None:
         raise HTTPException(status_code=404, detail="SiteSnapshot not found.")
     try:
-        return evaluate_site(snapshot, req.scene_state, req.requested_constraints)
+        return evaluate_site(snapshot, req.scene_state, req.requested_constraints or DEFAULT_SCENARIO_CONSTRAINTS)
     except SceneValidationError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 

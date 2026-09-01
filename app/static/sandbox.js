@@ -405,9 +405,19 @@
     return record && record.status === "ok" && record.value != null && Number(record.expires_at) > Date.now() / 1000 ? record.value : null;
   }
 
+  function evidenceStatus(field) {
+    const record = snapshotData && snapshotData.evidence && snapshotData.evidence[field];
+    if (!record) return "not fetched";
+    if (record.status === "error") return "provider unavailable";
+    if (Number(record.expires_at) <= Date.now() / 1000) return "stale";
+    if (record.status === "absent") return "reported absent";
+    if (record.value == null) return "missing";
+    return "current";
+  }
+
   function distanceContext(field, label) {
     const raw = usableEvidence(field);
-    if (raw === null) return "";
+    if (raw === null) return `${label} evidence is ${evidenceStatus(field)}. `;
     const value = Number(raw);
     return Number.isFinite(value) ? `${label}: ${(value / 1000).toFixed(1)} km. ` : "";
   }
@@ -421,7 +431,7 @@
       ["Land", results.footprint_inside_parcel],
       ["Flood", {
         ...results.parcel_outside_fema_sfha,
-        explanation: `${pointFlood === null ? "Resolution-point evidence is unavailable. " : `Resolution point is ${pointFlood ? "inside" : "outside"} the mapped FEMA floodplain. `}${results.parcel_outside_fema_sfha.explanation}`,
+        explanation: `${pointFlood === null ? `Resolution-point evidence is ${evidenceStatus("within_floodplain_polygon")}. ` : `Resolution point is ${pointFlood ? "inside" : "outside"} the mapped FEMA floodplain. `}${results.parcel_outside_fema_sfha.explanation}`,
       }],
       ["Transmission", {
         ...results.transmission_available_capacity_mw,
@@ -433,12 +443,12 @@
       }],
       ["Zoning", {
         ...results.industrial_zoning,
-        explanation: `${zoning ? `Raw parcel code: ${zoning}. ` : "Raw parcel code is unavailable. "}${results.industrial_zoning.explanation}`,
+        explanation: `${zoning ? `Raw parcel code: ${zoning}. ` : `Raw parcel code is ${evidenceStatus("parcel_zoning")}. `}${results.industrial_zoning.explanation}`,
       }],
       ["Interconnection", results.bess_export_interconnection],
       ["Water", {
         ...results.utilities_available,
-        explanation: `${water === null ? "Mapped water service-area evidence is unavailable. " : `Mapped service-area flag: ${water ? "yes" : "no"}. `}${results.utilities_available.explanation}`,
+        explanation: `${water === null ? `Mapped water service-area evidence is ${evidenceStatus("within_water_service_area")}. ` : `Mapped service-area flag: ${water ? "yes" : "no"}. `}${results.utilities_available.explanation}`,
       }],
       ["Expansion", {
         outcome: "UNRESOLVED",
@@ -638,9 +648,10 @@
     const landCover = worldLayer("land_cover");
     const warnings = worldData.layers.flatMap((layer) => layer.warnings || []);
     const conflicts = worldData.quality_conflicts || [];
-    const count = (layer, key) => layer && layer.availability === "AVAILABLE" ? String(layer[key].feature_count) : "Unavailable";
+    const unavailable = (layer) => !layer ? "Not requested" : layer.quality_state === "SOURCE_UNAVAILABLE" ? "Provider unavailable" : layer.quality_state === "SOURCE_UNVERIFIED" ? "Source not configured" : "Unavailable";
+    const count = (layer, key) => layer && layer.availability === "AVAILABLE" ? String(layer[key].feature_count) : unavailable(layer);
     renderFactsList(document.getElementById("worldFacts"), [
-      ["Terrain", terrain && terrain.availability === "AVAILABLE" ? `${terrain.terrain.actual_resolution_m} m / ${terrain.terrain.vertical_reference}` : "Unavailable"],
+      ["Terrain", terrain && terrain.availability === "AVAILABLE" ? `${terrain.terrain.actual_resolution_m} m / ${terrain.terrain.vertical_reference}` : unavailable(terrain)],
       ["Road features", count(roads, "roads")],
       ["Building footprints", count(buildings, "buildings")],
       ["Water features", count(water, "water")],

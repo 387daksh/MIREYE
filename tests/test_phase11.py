@@ -61,7 +61,8 @@ def test_phase11_catalog_plan_is_relevant_deduplicated_freshness_aware_and_offli
         snapshot_id=snapshot["snapshot_id"],
     ))
 
-    assert plan["selected_presets"] == ["data_center_siting"]
+    assert plan["selected_presets"] == []
+    assert plan["profile"] is None
     assert len(plan["fields"]) == len(set(plan["fields"]))
     assert {"parcel_owner", "parcel_boundary_geojson", "nearest_osm_transmission_line_distance_m", "within_water_service_area"} <= set(plan["fields"])
     assert "parcel_id" not in plan["refresh_fields"]

@@ -227,6 +227,18 @@ def test_task_context_requires_and_includes_canonical_identity(tmp_path):
     assert "graph_records" not in packet["retrieval_context"]
 
 
+def test_task_context_uses_candidate_identity_without_address_reconciliation(tmp_path):
+    store, project = _project(tmp_path)
+    candidate = project["candidates"][0]
+    candidate.update(parcel_id="parcel_robotic", parcel_match_type="exact_intersect")
+    packet = TaskContextBuilder(ProjectMemoryStore(store).context_builder).build(
+        project, _site_task(), project_spec={}, prior_observations=[],
+    )
+
+    assert packet["site_identity"]["parcel_id"] == "parcel_robotic"
+    assert packet["site_identity"]["match_type"] == "exact_intersect"
+
+
 def test_task_context_blocks_model_call_when_canonical_identity_is_incomplete(tmp_path):
     store, project = _project(tmp_path)
     project["candidates"][0]["address_reconciliation"] = {"canonical_address": "1032 Robotic Ave", "match_type": "exact_intersect"}

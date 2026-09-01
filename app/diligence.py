@@ -588,6 +588,7 @@ class DiligenceService:
             "active_decision": None, "decision_history": [], "assumptions": [],
             "active_candidate_id": None, "project_intelligence": None, "rfis": [],
             "external_evidence_by_site": {}, "power_readiness_by_site": {}, "entitlement_by_site": {},
+            "user_evidence_by_site": {},
             "watch": {
                 "watch_id": f"watch_{uuid.uuid4().hex}", "project_id": None, "site_id": None,
                 "source": "MIREYE", "fields": [], "layers": [], "cadence_policy": "MANUAL",
@@ -878,6 +879,74 @@ class DiligenceService:
             "entitlement": copy.deepcopy(project["entitlement_by_site"][site_id]),
         }
 
+    def add_user_evidence(
+        self,
+        project_id: str,
+        site_id: str,
+        *,
+        requirement_id: str,
+        title: str,
+        details: str,
+        provider: str,
+        source_url: str | None = None,
+        source_type: str = "document",
+    ) -> dict:
+        """Persist user-supplied context without promoting it to verified evidence."""
+        project = self.get(project_id)
+        candidate = self._site_candidate(project, site_id)
+        valid_requirements = {
+            item.get("constraint_id")
+            for item in project.get("request", {}).get("constraints", [])
+            if isinstance(item, dict)
+        }
+        if requirement_id not in valid_requirements:
+            raise DiligenceError("The selected requirement is not part of this project.")
+        title, details, provider = title.strip(), details.strip(), provider.strip()
+        source_url = source_url.strip() if source_url else None
+        if not 3 <= len(title) <= 200 or not 1 <= len(details) <= 8000 or not 2 <= len(provider) <= 200:
+            raise DiligenceError("User evidence requires a title, details, and source organization.")
+        if source_url and not re.match(r"^https?://[^\s]+$", source_url, re.IGNORECASE):
+            raise DiligenceError("Evidence source URL must use http or https.")
+        payload = {
+            "site_id": site_id,
+            "requirement_id": requirement_id,
+            "title": title,
+            "details": details,
+            "provider": provider,
+            "source_url": source_url,
+            "source_type": source_type,
+        }
+        evidence_id = f"user_evidence_{hashlib.sha256(_canonical(payload).encode('utf-8')).hexdigest()[:24]}"
+        records = project.setdefault("user_evidence_by_site", {}).setdefault(site_id, [])
+        existing = next((item for item in records if item.get("evidence_id") == evidence_id), None)
+        if existing is None:
+            existing = {
+                "evidence_id": evidence_id,
+                **payload,
+                "snapshot_id": candidate["snapshot_id"],
+                "status": "PENDING_REVIEW",
+                "semantic_strength": "USER_SUPPLIED",
+                "human_review_required": True,
+                "submitted_at": time.time(),
+            }
+            records.append(existing)
+        self._update_project_intelligence(project)
+        return {"evidence": copy.deepcopy(existing), "project": self._save(project)}
+
+    def user_evidence(self, project_id: str) -> dict:
+        project = self.get(project_id)
+        records = [
+            copy.deepcopy(record)
+            for site_records in project.get("user_evidence_by_site", {}).values()
+            for record in site_records
+            if isinstance(record, dict)
+        ]
+        return {
+            "project_id": project_id,
+            "records": records,
+            "pending_review": sum(item.get("status") == "PENDING_REVIEW" for item in records),
+        }
+
     def power_readiness(self, project_id: str, site_id: str) -> dict:
         project = self.get(project_id)
         candidate = self._site_candidate(project, site_id)
@@ -902,6 +971,7 @@ class DiligenceService:
             raise DiligenceError("The generated RFI must be a substantive request of at most 8,000 characters.")
         draft = {
             "rfi_id": f"rfi_{uuid.uuid4().hex}", "action_id": action_id, "type": action["type"],
+            "requirement_id": action["requirement_id"],
             "recipient_category": action["recipient_category"], "project_id": project_id, "site_id": action["site_id"],
             "required_evidence": copy.deepcopy(action["required_evidence"]),
             "generated_request": generated_request.strip(), "dependencies": copy.deepcopy(action["dependencies"]),
@@ -915,6 +985,119 @@ class DiligenceService:
                 item["rfi_id"] = draft["rfi_id"]
         self._save(project)
         return copy.deepcopy(draft)
+
+    def update_rfi_draft(
+        self,
+        project_id: str,
+        rfi_id: str,
+        *,
+        generated_request: str | None = None,
+        recipient_name: str | None = None,
+        recipient_contact: str | None = None,
+        internal_notes: str | None = None,
+    ) -> dict:
+        project = self.get(project_id)
+        rfi = next((item for item in project.get("rfis", []) if item.get("rfi_id") == rfi_id), None)
+        if rfi is None:
+            raise DiligenceError("RFI draft not found.")
+        if rfi.get("status") != "DRAFT":
+            raise DiligenceError("Only a draft RFI can be edited.")
+        if generated_request is not None:
+            if not isinstance(generated_request, str) or not 40 <= len(generated_request.strip()) <= 8000:
+                raise DiligenceError("The RFI request must be between 40 and 8,000 characters.")
+            rfi["generated_request"] = generated_request.strip()
+        for key, value, maximum in (
+            ("recipient_name", recipient_name, 200),
+            ("recipient_contact", recipient_contact, 300),
+            ("internal_notes", internal_notes, 2000),
+        ):
+            if value is not None:
+                if not isinstance(value, str) or len(value.strip()) > maximum:
+                    raise DiligenceError(f"Invalid {key.replace('_', ' ')}.")
+                rfi[key] = value.strip() or None
+        rfi["updated_at"] = time.time()
+        self._save(project)
+        return copy.deepcopy(rfi)
+
+    def approve_rfi(self, project_id: str, rfi_id: str, approved_by: str) -> dict:
+        project = self.get(project_id)
+        rfi = next((item for item in project.get("rfis", []) if item.get("rfi_id") == rfi_id), None)
+        if rfi is None:
+            raise DiligenceError("RFI draft not found.")
+        if rfi.get("status") != "DRAFT":
+            raise DiligenceError("Only a draft RFI can be approved.")
+        if not rfi.get("recipient_contact"):
+            raise DiligenceError("Add a recipient contact before approval.")
+        if not isinstance(approved_by, str) or not 2 <= len(approved_by.strip()) <= 200:
+            raise DiligenceError("Approved by must identify the reviewer.")
+        rfi.update(status="APPROVED", approved_by=approved_by.strip(), approved_at=time.time(), human_approval_required=False)
+        self._update_project_intelligence(project)
+        self._save(project)
+        return copy.deepcopy(rfi)
+
+    def mark_rfi_sent(self, project_id: str, rfi_id: str, sent_by: str, delivery_reference: str | None = None) -> dict:
+        project = self.get(project_id)
+        rfi = next((item for item in project.get("rfis", []) if item.get("rfi_id") == rfi_id), None)
+        if rfi is None:
+            raise DiligenceError("RFI draft not found.")
+        if rfi.get("status") != "APPROVED":
+            raise DiligenceError("Approve the RFI before marking it sent.")
+        if not isinstance(sent_by, str) or not 2 <= len(sent_by.strip()) <= 200:
+            raise DiligenceError("Sent by must identify the sender.")
+        if delivery_reference is not None and (not isinstance(delivery_reference, str) or len(delivery_reference.strip()) > 500):
+            raise DiligenceError("Delivery reference must be at most 500 characters.")
+        rfi.update(
+            status="SENT",
+            sent_by=sent_by.strip(),
+            sent_at=time.time(),
+            delivery_reference=delivery_reference.strip() if delivery_reference else None,
+        )
+        self._update_project_intelligence(project)
+        self._save(project)
+        return copy.deepcopy(rfi)
+
+    def record_rfi_response(
+        self,
+        project_id: str,
+        rfi_id: str,
+        *,
+        details: str,
+        provider: str,
+        source_url: str | None = None,
+        source_type: str = "email",
+    ) -> dict:
+        project = self.get(project_id)
+        rfi = next((item for item in project.get("rfis", []) if item.get("rfi_id") == rfi_id), None)
+        if rfi is None:
+            raise DiligenceError("RFI draft not found.")
+        if rfi.get("status") != "SENT":
+            raise DiligenceError("Mark the RFI sent before recording a response.")
+        requirement_id = rfi.get("requirement_id")
+        if not requirement_id:
+            self._update_project_intelligence(project)
+            action = next(
+                (item for item in project["project_intelligence"]["recommended_actions"] if item.get("action_id") == rfi.get("action_id")),
+                None,
+            )
+            requirement_id = action.get("requirement_id") if action else None
+        if not requirement_id:
+            raise DiligenceError("The RFI is not linked to a project requirement.")
+        result = self.add_user_evidence(
+            project_id,
+            rfi["site_id"],
+            requirement_id=requirement_id,
+            title=f"Response to {str(rfi['type']).replace('_', ' ').title()}",
+            details=details,
+            provider=provider,
+            source_url=source_url,
+            source_type=source_type,
+        )
+        project = self.get(project_id)
+        rfi = next(item for item in project["rfis"] if item.get("rfi_id") == rfi_id)
+        rfi.update(status="RESPONSE_RECEIVED", responded_at=time.time(), response_evidence_id=result["evidence"]["evidence_id"])
+        self._update_project_intelligence(project)
+        self._save(project)
+        return {"rfi": copy.deepcopy(rfi), **result}
 
     @staticmethod
     def _find_metered_operation(project: dict, operation_type: str, request: dict) -> dict | None:
@@ -1228,6 +1411,68 @@ class DiligenceService:
         self._update_project_intelligence(project)
         return self._save(project)
 
+    def link_existing_snapshot(self, project_id: str, candidate_id: str, snapshot_id: str) -> dict:
+        """Link matching immutable evidence without fetching or changing its provenance."""
+        project = self.get(project_id)
+        candidate = self._candidate(project, candidate_id)
+        snapshot = self.sandbox.get_snapshot(snapshot_id)
+        if snapshot is None:
+            raise DiligenceError("SiteSnapshot was not found.")
+        if snapshot.get("workspace_id") != project["workspace_id"]:
+            raise DiligenceError("SiteSnapshot and diligence project must belong to the same workspace.")
+        candidate_point = candidate.get("selected_location") or candidate.get("coordinate")
+        snapshot_point = snapshot.get("parcel_identity", {}).get("selected_point")
+        if not all(
+            isinstance(point, dict) and isinstance(point.get(axis), (int, float))
+            for point in (candidate_point, snapshot_point)
+            for axis in ("lat", "lng")
+        ) or not all(
+            math.isclose(float(candidate_point[axis]), float(snapshot_point[axis]), rel_tol=0, abs_tol=1e-7)
+            for axis in ("lat", "lng")
+        ):
+            raise DiligenceError("Candidate and SiteSnapshot resolved coordinates do not match.")
+        candidate_parcel_id = candidate_point.get("parcel_id")
+        snapshot_parcel_id = snapshot.get("parcel_identity", {}).get("parcel_id")
+        if candidate_parcel_id and candidate_parcel_id != snapshot_parcel_id:
+            raise DiligenceError("Candidate and SiteSnapshot parcel IDs do not match.")
+        if not project["requested_fields"]:
+            self.plan_fields(project_id)
+            project = self.get(project_id)
+            candidate = self._candidate(project, candidate_id)
+        freshness = self.sandbox.freshness_status(snapshot_id, fields=project["requested_fields"])
+        linked_at = time.time()
+        candidate["selected_location"] = copy.deepcopy(candidate_point)
+        candidate["snapshot_link"] = {
+            "snapshot_id": snapshot_id, "linked_at": linked_at, "mode": "existing_snapshot",
+            "fetch_performed": False, "charged_credits": 0,
+        }
+        canonical_address = snapshot["parcel_identity"].get("parcel_address")
+        if _material_address_difference(candidate.get("address"), canonical_address):
+            candidate.update(
+                reconciliation_status="ADDRESS_CONFIRMATION_REQUIRED",
+                snapshot_id=snapshot_id, site_id=snapshot.get("site_id"), evaluation=None, error=None,
+                address_reconciliation={
+                    "submitted_address": candidate["address"], "canonical_address": canonical_address,
+                    "parcel_id": snapshot_parcel_id,
+                    "match_type": snapshot["parcel_identity"].get("parcel_match_type"),
+                    "match_distance_m": snapshot["parcel_identity"].get("parcel_match_distance_m"),
+                    "status": "CONFIRMATION_REQUIRED",
+                },
+            )
+            self._queue_address_confirmation(project)
+        else:
+            self._finalize_candidate(project, candidate, snapshot)
+        project["ranking"] = self._rank(project["candidates"])
+        project["decision"] = self._decision(project["request"], project["ranking"])
+        if not project.get("active_decision"):
+            project["status"] = "EVALUATED" if project["decision"]["status"] == "DECISION_READY" else project["decision"]["status"]
+        self._update_project_intelligence(project)
+        saved = self._save(project)
+        return {
+            "project": saved, "candidate": copy.deepcopy(self._candidate(saved, candidate_id)),
+            "freshness": freshness, "fetch_performed": False, "charged_credits": 0,
+        }
+
     def rank_candidates(self, project_id: str) -> dict:
         project = self.get(project_id)
         if project["request"]["requirement_status"] != "READY":
@@ -1435,7 +1680,11 @@ class DiligenceService:
                 current_world = None
         scene = scene_state_from_snapshot(snapshot)
         constraints = project["request"]["constraints"] or [{"constraint_id": "footprint_inside_parcel"}]
-        candidate.update(snapshot_id=snapshot["snapshot_id"], site_id=snapshot.get("site_id"), evaluation=evaluate_site(snapshot, scene, constraints))
+        identity = snapshot["parcel_identity"]
+        candidate.update(
+            snapshot_id=snapshot["snapshot_id"], site_id=snapshot.get("site_id"), evaluation=evaluate_site(snapshot, scene, constraints),
+            parcel_id=identity.get("parcel_id"), apn=identity.get("parcel_apn"), parcel_match_type=identity.get("parcel_match_type"),
+        )
         candidate.setdefault("summary", {})["sandbox_url"] = (
             f"/sandbox/{snapshot['snapshot_id']}?world={current_world['world_snapshot_id']}" if current_world
             else f"/sandbox/{snapshot['snapshot_id']}"
@@ -1673,14 +1922,21 @@ class DiligenceService:
 
     def _finalize_candidate(self, project: dict, candidate: dict, snapshot: dict) -> None:
         scene = scene_state_from_snapshot(snapshot)
+        identity = snapshot["parcel_identity"]
         constraints = project["request"]["constraints"] or [{"constraint_id": "footprint_inside_parcel"}]
         evidence = snapshot.get("evidence", {})
         def value(field: str) -> Any:
-            return (evidence.get(field) or {}).get("value")
+            record = evidence.get(field) or {}
+            try:
+                fresh = float(record.get("expires_at")) > time.time()
+            except (TypeError, ValueError):
+                fresh = False
+            return record.get("value") if record.get("status") in {"ok", None} and fresh else None
         world = self.worlds.latest_for_site_snapshot(snapshot["snapshot_id"]) if self.worlds else None
         world_query = f"?world={world['world_snapshot_id']}" if world else ""
         candidate.update(
             reconciliation_status="ENRICHED", snapshot_id=snapshot["snapshot_id"], site_id=snapshot.get("site_id"),
+            parcel_id=identity.get("parcel_id"), apn=identity.get("parcel_apn"), parcel_match_type=identity.get("parcel_match_type"),
             evaluation=evaluate_site(snapshot, scene, constraints), error=None,
             summary={
                 "title": snapshot["parcel_identity"].get("parcel_address") or candidate.get("address") or "Verified property",

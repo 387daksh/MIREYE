@@ -303,7 +303,17 @@ export function FeasibilitySection() {
 
 /* ─── MIREYE site intelligence ────────────────────────────────────────────── */
 
-export function IntelligenceSection({ onViewSources }: { onViewSources: () => void }) {
+export function IntelligenceSection({
+  projectId,
+  candidateId,
+  onRefresh,
+  onViewSources,
+}: {
+  projectId?: string;
+  candidateId?: string;
+  onRefresh?: () => Promise<unknown>;
+  onViewSources: () => void;
+}) {
   const { snapshotId, snapshot, plan, reloadPlan } = useSite();
   const now = useNowSeconds();
   const [spendPlan, setSpendPlan] = useState<Value>();
@@ -357,12 +367,15 @@ export function IntelligenceSection({ onViewSources }: { onViewSources: () => vo
     if (!snapshotId) return;
     setBusy(true);
     setNote(undefined);
-    const response = await api.POST("/v1/sandbox/site/{snapshot_id}/refresh/quote", {
-      params: {
-        path: { snapshot_id: snapshotId },
-        query: { profile: "bess_siting" },
-      } as never,
-    });
+    const response =
+      projectId && candidateId
+        ? await api.POST(
+            "/v1/diligence/projects/{project_id}/candidates/{candidate_id}/refresh/quote",
+            { params: { path: { project_id: projectId, candidate_id: candidateId } } },
+          )
+        : await api.POST("/v1/sandbox/site/{snapshot_id}/refresh/quote", {
+            params: { path: { snapshot_id: snapshotId }, query: { profile: "bess_siting" } } as never,
+          });
     setBusy(false);
     if (response.error) return setNote("MIREYE couldn't prepare a refresh estimate.");
     const result = rec(response.data);
@@ -376,10 +389,19 @@ export function IntelligenceSection({ onViewSources }: { onViewSources: () => vo
   async function confirm() {
     if (!spendPlan) return;
     setBusy(true);
-    const response = await api.POST("/v1/sandbox/site/refresh/{spend_plan_id}/confirm", {
-      params: { path: { spend_plan_id: String(spendPlan.spend_plan_id) } },
-      body: { confirmed: true } as never,
-    });
+    const response =
+      projectId && candidateId
+        ? await api.POST(
+            "/v1/diligence/projects/{project_id}/candidates/{candidate_id}/refresh",
+            {
+              params: { path: { project_id: projectId, candidate_id: candidateId } },
+              body: { spend_plan_id: String(spendPlan.spend_plan_id), confirmed: true },
+            },
+          )
+        : await api.POST("/v1/sandbox/site/refresh/{spend_plan_id}/confirm", {
+            params: { path: { spend_plan_id: String(spendPlan.spend_plan_id) } },
+            body: { confirmed: true },
+          });
     setBusy(false);
     if (response.error) {
       setNote(
@@ -388,7 +410,8 @@ export function IntelligenceSection({ onViewSources }: { onViewSources: () => vo
       return;
     }
     setSpendPlan(undefined);
-    reloadPlan();
+    if (onRefresh) await onRefresh();
+    else reloadPlan();
   }
 
   const credits = spendPlan?.expected_credits;
@@ -657,7 +680,17 @@ export function SourcesDialog({ open, onClose }: { open: boolean; onClose: () =>
 /* ─── Composed rail ───────────────────────────────────────────────────────── */
 
 /** Everything that is keyed to the SiteSnapshot rather than the project. */
-export function SiteSections({ workspaceId }: { workspaceId?: string }) {
+export function SiteSections({
+  workspaceId,
+  projectId,
+  candidateId,
+  onRefresh,
+}: {
+  workspaceId?: string;
+  projectId?: string;
+  candidateId?: string;
+  onRefresh?: () => Promise<unknown>;
+}) {
   const [sourcesOpen, setSourcesOpen] = useState(false);
   const { snapshotId } = useSite();
   if (!snapshotId) return null;
@@ -667,7 +700,12 @@ export function SiteSections({ workspaceId }: { workspaceId?: string }) {
         <FeasibilitySection />
       </Reveal>
       <Reveal delay={0.06}>
-        <IntelligenceSection onViewSources={() => setSourcesOpen(true)} />
+        <IntelligenceSection
+          projectId={projectId}
+          candidateId={candidateId}
+          onRefresh={onRefresh}
+          onViewSources={() => setSourcesOpen(true)}
+        />
       </Reveal>
       <Reveal delay={0.12}>
         <ProposedDesignSection />

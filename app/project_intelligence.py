@@ -270,7 +270,7 @@ def _gap_from_coverage(
 
 
 def _rank_actions(gaps: list[dict], project_id: str, rfis: list[dict] | None = None) -> list[dict]:
-    drafts = {item.get("action_id"): item for item in (rfis or []) if item.get("status") == "DRAFT"}
+    requests = {item.get("action_id"): item for item in (rfis or [])}
     actions = []
     for gap in gaps:
         downstream = len(gap["affected_constraints"]) + len({item["scenario_id"] for item in gap["affected_scenarios"]})
@@ -302,8 +302,12 @@ def _rank_actions(gaps: list[dict], project_id: str, rfis: list[dict] | None = N
             },
             "expected_impact": gap["impact"], "estimated_time": None, "estimated_cost": None,
         }
-        if action_id in drafts:
-            action.update(status="DRAFTED", rfi_id=drafts[action_id]["rfi_id"])
+        if action_id in requests:
+            request = requests[action_id]
+            action.update(
+                status={"DRAFT": "DRAFTED"}.get(request.get("status"), request.get("status", "DRAFTED")),
+                rfi_id=request["rfi_id"],
+            )
         actions.append(action)
     actions.sort(key=lambda item: (-item["score"], item["action_id"]))
     for rank, action in enumerate(actions, 1):

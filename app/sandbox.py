@@ -54,8 +54,8 @@ SITE_SNAPSHOT_FIELDS = (
     "sewer_service_area_provider",
 )
 
-# The provider currently exposes this preset name; MIREYE evidence selection stays unchanged.
-BESS_SITING_PRESET = "data_center_siting"
+# The provider does not yet expose a BESS preset; fall back to explicit BESS fields.
+BESS_SITING_PRESET = "bess_siting"
 MIREYE_EXPLICIT_FIELD_LIMIT = 50
 PROJECT_EVIDENCE_FIELDS = {
     "identity": (
@@ -746,7 +746,21 @@ class SiteSnapshotService:
             fetch_fields = fields
         try:
             _selected_fields, catalog = await self._catalog_selection(fetch_fields if preset else fields)
-            quote = await self.client.fetch_quote(locations=1, fields=fetch_fields, preset=preset)
+            if preset or len(fetch_fields) <= MIREYE_EXPLICIT_FIELD_LIMIT:
+                batch_fields = [fetch_fields]
+            else:
+                identity = [field for field in PROJECT_EVIDENCE_FIELDS["identity"] if field in fetch_fields]
+                ordered = identity + [field for field in fetch_fields if field not in identity]
+                batch_fields = [ordered[offset:offset + MIREYE_EXPLICIT_FIELD_LIMIT] for offset in range(0, len(ordered), MIREYE_EXPLICIT_FIELD_LIMIT)]
+            fetch_batches = []
+            for selected in batch_fields:
+                batch_quote = await self.client.fetch_quote(locations=1, fields=selected, preset=preset)
+                fetch_batches.append({"fields": selected, "preset": preset, "quote": batch_quote})
+            batch_costs = [self._estimated_credits(item["quote"]) for item in fetch_batches]
+            quote = fetch_batches[0]["quote"] if len(fetch_batches) == 1 else {
+                "estimated_credits": sum(batch_costs) if all(isinstance(cost, (int, float)) for cost in batch_costs) else None,
+                "batch_quotes": [item["quote"] for item in fetch_batches],
+            }
         except httpx.HTTPError as exc:
             raise MireyeUnavailableError("MIREYE refresh quote is temporarily unavailable.") from exc
         created_at = time.time() if now is None else float(now)
@@ -770,6 +784,7 @@ class SiteSnapshotService:
             "status": "QUOTED",
             "requested_fields": fields,
             "fetch_fields": fetch_fields,
+            "fetch_batches": fetch_batches,
             "preset": preset,
             "project_profile": project_profile,
             "field_manifest": project_plan["field_manifest"] if project_plan else None,
@@ -834,10 +849,24 @@ class SiteSnapshotService:
             }
             if plan.get("preset"):
                 request["preset"] = plan["preset"]
-            dossier = await self.client.fetch(
-                lat=request["lat"], lng=request["lng"],
-                fields=request["fields"], preset=plan.get("preset"),
-            )
+            responses = []
+            for batch in plan.get("fetch_batches") or [{"fields": request["fields"], "preset": plan.get("preset")}]:
+                response = await self.client.fetch(
+                    lat=request["lat"], lng=request["lng"],
+                    fields=batch["fields"], preset=batch.get("preset"),
+                )
+                if response.get("ok") is False:
+                    message = response.get("error", {}).get("message", "MIREYE could not refresh this location.")
+                    raise SandboxError(message)
+                responses.append(response)
+            if len(responses) == 1:
+                dossier = responses[0]
+            else:
+                dossier = {
+                    "ok": True,
+                    "fields": {name: record for response in responses for name, record in response.get("fields", {}).items()},
+                    "batches": responses,
+                }
         except httpx.HTTPError as exc:
             raise MireyeUnavailableError("MIREYE refresh fetch is temporarily unavailable.") from exc
         if dossier.get("ok") is False:
@@ -1017,7 +1046,7 @@ class SiteSnapshotService:
     ) -> dict:
         return await self.catalog_evidence_plan(
             project_type="Battery energy storage system", requested_decision="site_diligence", snapshot_id=snapshot_id,
-            profile=profile, now=now, require_profile=True,
+            profile=profile, now=now,
         )
 
     async def _catalog_selection(self, fields: list[str]) -> tuple[list[str], dict]:

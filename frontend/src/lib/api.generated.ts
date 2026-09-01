@@ -297,6 +297,23 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/diligence/projects/{project_id}/candidates/{candidate_id}/snapshot-link": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Link Diligence Candidate Snapshot */
+        post: operations["link_diligence_candidate_snapshot_v1_diligence_projects__project_id__candidates__candidate_id__snapshot_link_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/diligence/projects/{project_id}/candidates/{candidate_id}/world-snapshot": {
         parameters: {
             query?: never;
@@ -538,6 +555,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/diligence/projects/{project_id}/rfis/{rfi_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Update Diligence Project Rfi */
+        patch: operations["update_diligence_project_rfi_v1_diligence_projects__project_id__rfis__rfi_id__patch"];
+        trace?: never;
+    };
+    "/v1/diligence/projects/{project_id}/rfis/{rfi_id}/approve": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Approve Diligence Project Rfi */
+        post: operations["approve_diligence_project_rfi_v1_diligence_projects__project_id__rfis__rfi_id__approve_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/diligence/projects/{project_id}/rfis/{rfi_id}/response": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Record Diligence Project Rfi Response */
+        post: operations["record_diligence_project_rfi_response_v1_diligence_projects__project_id__rfis__rfi_id__response_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/diligence/projects/{project_id}/rfis/{rfi_id}/sent": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Mark Diligence Project Rfi Sent */
+        post: operations["mark_diligence_project_rfi_sent_v1_diligence_projects__project_id__rfis__rfi_id__sent_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/diligence/projects/{project_id}/sites/{site_id}/entitlement": {
         parameters: {
             query?: never;
@@ -583,6 +668,23 @@ export interface paths {
         put?: never;
         /** Refresh Diligence Site Sources */
         post: operations["refresh_diligence_site_sources_v1_diligence_projects__project_id__sites__site_id__sources_refresh_post"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/diligence/projects/{project_id}/sites/{site_id}/user-evidence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Add Diligence User Evidence */
+        post: operations["add_diligence_user_evidence_v1_diligence_projects__project_id__sites__site_id__user_evidence_post"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1517,12 +1619,74 @@ export interface components {
             /** Option Index */
             option_index: number;
         };
+        /** DiligenceRfiApprovalRequest */
+        DiligenceRfiApprovalRequest: {
+            /** Approved By */
+            approved_by: string;
+        };
         /** DiligenceRfiDraftRequest */
         DiligenceRfiDraftRequest: {
             /** Action Id */
             action_id: string;
             /** Generated Request */
             generated_request: string;
+        };
+        /** DiligenceRfiResponseRequest */
+        DiligenceRfiResponseRequest: {
+            /** Details */
+            details: string;
+            /** Provider */
+            provider: string;
+            /**
+             * Source Type
+             * @default email
+             * @enum {string}
+             */
+            source_type: "document" | "email" | "study" | "note";
+            /** Source Url */
+            source_url?: string | null;
+        };
+        /** DiligenceRfiSentRequest */
+        DiligenceRfiSentRequest: {
+            /** Delivery Reference */
+            delivery_reference?: string | null;
+            /** Sent By */
+            sent_by: string;
+        };
+        /** DiligenceRfiUpdateRequest */
+        DiligenceRfiUpdateRequest: {
+            /** Generated Request */
+            generated_request?: string | null;
+            /** Internal Notes */
+            internal_notes?: string | null;
+            /** Recipient Contact */
+            recipient_contact?: string | null;
+            /** Recipient Name */
+            recipient_name?: string | null;
+        };
+        /** DiligenceSnapshotLinkRequest */
+        DiligenceSnapshotLinkRequest: {
+            /** Snapshot Id */
+            snapshot_id: string;
+        };
+        /** DiligenceUserEvidenceRequest */
+        DiligenceUserEvidenceRequest: {
+            /** Details */
+            details: string;
+            /** Provider */
+            provider: string;
+            /** Requirement Id */
+            requirement_id: string;
+            /**
+             * Source Type
+             * @default document
+             * @enum {string}
+             */
+            source_type: "document" | "email" | "study" | "note";
+            /** Source Url */
+            source_url?: string | null;
+            /** Title */
+            title: string;
         };
         /** DiligenceWatchRequest */
         DiligenceWatchRequest: {
@@ -2571,6 +2735,42 @@ export interface operations {
             };
         };
     };
+    link_diligence_candidate_snapshot_v1_diligence_projects__project_id__candidates__candidate_id__snapshot_link_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                candidate_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiligenceSnapshotLinkRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     build_diligence_candidate_world_v1_diligence_projects__project_id__candidates__candidate_id__world_snapshot_post: {
         parameters: {
             query?: never;
@@ -3054,6 +3254,150 @@ export interface operations {
             };
         };
     };
+    update_diligence_project_rfi_v1_diligence_projects__project_id__rfis__rfi_id__patch: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                rfi_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiligenceRfiUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    approve_diligence_project_rfi_v1_diligence_projects__project_id__rfis__rfi_id__approve_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                rfi_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiligenceRfiApprovalRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    record_diligence_project_rfi_response_v1_diligence_projects__project_id__rfis__rfi_id__response_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                rfi_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiligenceRfiResponseRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    mark_diligence_project_rfi_sent_v1_diligence_projects__project_id__rfis__rfi_id__sent_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                rfi_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiligenceRfiSentRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     get_diligence_entitlement_v1_diligence_projects__project_id__sites__site_id__entitlement_get: {
         parameters: {
             query?: never;
@@ -3129,6 +3473,42 @@ export interface operations {
             cookie?: never;
         };
         requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": unknown;
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    add_diligence_user_evidence_v1_diligence_projects__project_id__sites__site_id__user_evidence_post: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                project_id: string;
+                site_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DiligenceUserEvidenceRequest"];
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {

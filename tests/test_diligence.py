@@ -1,12 +1,15 @@
 import asyncio
 import copy
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
 from app import main
+from app.ai.memory import ProjectMemoryStore
+from app.ai.schemas.orchestration import MemoryKind
 from app.diligence import CONSTRAINT_CAPABILITIES, CONSTRAINT_FIELDS, DiligenceError, DiligenceService, UserSuppliedCandidateProvider, compile_project_request
 from app.mireye_client import MireyeClient
 from app.sandbox import BESS_CONTEXT_FIELDS, ConfirmationRequired, SITE_SNAPSHOT_FIELDS, SITE_SNAPSHOT_FIELD_SCOPES, SiteSnapshotService
@@ -135,7 +138,7 @@ def test_agent_tool_contracts_cover_project_and_existing_sandbox_workflow():
         "resolve_candidate", "plan_mireye_fields", "quote_mireye_enrichment",
         "confirm_and_fetch_enrichment", "evaluate_candidates", "rank_candidates",
         "compare_candidates", "check_evidence_freshness", "quote_mireye_refresh",
-        "confirm_and_refresh_evidence", "get_evidence", "ask_mireye_site", "build_world_snapshot",
+        "confirm_and_refresh_evidence", "get_evidence", "get_user_evidence", "ask_mireye_site", "build_world_snapshot",
     } <= project_tools
     assert {"get_site_context", "propose_bess_facility", "transform_object", "optimize_layout", "evaluate_scenario", "branch_scenario", "compare_scenarios", "reset_proposals"} <= sandbox_tools
     assert project_tools.isdisjoint({"lookup", "fetch", "fetch_batch", "mireye_client"})
@@ -244,6 +247,8 @@ def test_batch_enrichment_preserves_partial_failure_and_ranks_deterministically(
     assert completed["ranking"][1]["outcome_counts"]["FAIL"] > 0
     assert completed["ranking"][-1]["status"] == "ENRICHMENT_FAILED"
     assert store.get_site_snapshot(completed["candidates"][0]["snapshot_id"])["parcel_identity"]["parcel_match_type"] == "exact_intersect"
+    assert completed["candidates"][0]["parcel_id"] == "parcel-32"
+    assert completed["candidates"][0]["parcel_match_type"] == "exact_intersect"
 
 
 def test_failed_batch_candidate_requotes_without_repeating_lookup(diligence):
@@ -262,6 +267,65 @@ def test_failed_batch_candidate_requotes_without_repeating_lookup(diligence):
     assert retried["status"] == "NEEDS_USER_DECISION"
     assert len(client.lookup_calls) == lookup_count
     assert retried["candidates"][0]["reconciliation_status"] == "RESOLVED"
+
+
+def test_matching_candidate_links_existing_snapshot_without_fetch_and_preserves_freshness(diligence):
+    service, client, store = diligence
+    source = create_project(service, [{"lat": 32.0, "lng": -97.0}])
+    fields = service.plan_fields(source["project_id"])["fields"]
+    catalog = run(client.meta_fields())
+    for item in catalog["fields"]:
+        item["ttl_seconds"] = 3600 if item["name"] != "parcel_area_m2" else 0
+        item["dataset_vintage"] = "test-vintage"
+    dossier = client._dossier({"lat": 32.0, "lng": -97.0}, fields)
+    dossier["snapshot_ts"] = datetime.now(timezone.utc).isoformat()
+    snapshot = service.sandbox.persist_dossier(
+        workspace_id="workspace-1", lat=32.0, lng=-97.0, fields=fields,
+        catalog=catalog, quote={"quote_id": "existing-snapshot"}, dossier=dossier,
+    )
+    before = copy.deepcopy(store.get_site_snapshot(snapshot["snapshot_id"]))
+    target = create_project(service, [{"lat": 32.0, "lng": -97.0}])
+    calls_before = (len(client.lookup_calls), len(client.quote_calls), len(client.batch_calls), len(client.fetch_calls))
+
+    linked = service.link_existing_snapshot(
+        target["project_id"], target["candidates"][0]["candidate_id"], snapshot["snapshot_id"],
+    )
+
+    candidate = linked["candidate"]
+    assert candidate["reconciliation_status"] == "ENRICHED"
+    assert candidate["snapshot_id"] == snapshot["snapshot_id"]
+    assert candidate["site_id"] == snapshot["site_id"]
+    assert candidate["summary"]["area_acres"] is None
+    assert candidate["snapshot_link"]["fetch_performed"] is False
+    assert linked["fetch_performed"] is False and linked["charged_credits"] == 0
+    assert "parcel_boundary_geojson" in linked["freshness"]["fresh_fields"]
+    assert "parcel_area_m2" in linked["freshness"]["stale_fields"]
+    assert candidate["evaluation"]["overall_status"] == "UNRESOLVED"
+    assert (len(client.lookup_calls), len(client.quote_calls), len(client.batch_calls), len(client.fetch_calls)) == calls_before
+    after = store.get_site_snapshot(snapshot["snapshot_id"])
+    assert after["raw_response_hash"] == before["raw_response_hash"]
+    assert after["evidence"] == before["evidence"]
+
+
+def test_snapshot_link_rejects_cross_workspace_and_coordinate_mismatch(diligence):
+    service, client, _store = diligence
+    fields = service.plan_fields(create_project(service, [{"lat": 32.0, "lng": -97.0}])["project_id"])["fields"]
+    dossier = client._dossier({"lat": 32.0, "lng": -97.0}, fields)
+    snapshot = service.sandbox.persist_dossier(
+        workspace_id="workspace-1", lat=32.0, lng=-97.0, fields=fields,
+        catalog=run(client.meta_fields()), quote={"quote_id": "existing-snapshot"}, dossier=dossier,
+    )
+    wrong_point = service.create_project(
+        workspace_id="workspace-1", message="100 MW / 400 MWh BESS", candidates=[{"lat": 32.1, "lng": -97.0}],
+    )
+    other_workspace = service.create_project(
+        workspace_id="workspace-2", message="100 MW / 400 MWh BESS", candidates=[{"lat": 32.0, "lng": -97.0}],
+    )
+
+    with pytest.raises(DiligenceError, match="coordinates do not match"):
+        service.link_existing_snapshot(wrong_point["project_id"], wrong_point["candidates"][0]["candidate_id"], snapshot["snapshot_id"])
+    with pytest.raises(DiligenceError, match="same workspace"):
+        service.link_existing_snapshot(other_workspace["project_id"], other_workspace["candidates"][0]["candidate_id"], snapshot["snapshot_id"])
 
 
 def test_candidate_handoff_watch_and_restart_safe_persistence(diligence):
@@ -299,6 +363,8 @@ def test_candidate_refresh_creates_t2_and_re_evaluates_project(monkeypatch, dili
     assert refresh_plan["requested_fields"] == sorted(set(completed["requested_fields"]) | {"parcel_id", "parcel_boundary_geojson", "parcel_match_type", "parcel_match_distance_m"})
     assert updated_candidate["snapshot_id"] != original_snapshot["snapshot_id"]
     assert updated_candidate["evaluation"]["site_snapshot_id"] == updated_candidate["snapshot_id"]
+    assert updated_candidate["parcel_id"] == original_snapshot["parcel_identity"]["parcel_id"]
+    assert updated_candidate["parcel_match_type"] == "exact_intersect"
     assert store.get_site_snapshot(original_snapshot["snapshot_id"])["raw_response_hash"] == original_snapshot["raw_response_hash"]
     assert len(client.fetch_calls) == 1
 
@@ -993,6 +1059,64 @@ def test_phase10_generated_rfi_references_validated_missing_evidence(diligence):
     assert refreshed_action["status"] == "DRAFTED" and refreshed_action["rfi_id"] == draft["rfi_id"]
 
 
+def test_rfi_review_send_and_response_flow_preserves_evidence_review_gate(monkeypatch, diligence):
+    service, _client, store = diligence
+    project = _phase10_blocked_project(service, "workspace-rfi-lifecycle")
+    action = service.next_actions(project["project_id"])["prioritized_actions"][0]
+    draft = service.create_rfi_draft(
+        project["project_id"],
+        action["action_id"],
+        "Please confirm the site-specific export and injection capability and applicable interconnection study path for the proposed BESS.",
+    )
+
+    with pytest.raises(DiligenceError, match="Approve the RFI"):
+        service.mark_rfi_sent(project["project_id"], draft["rfi_id"], "Project lead")
+    updated = service.update_rfi_draft(
+        project["project_id"],
+        draft["rfi_id"],
+        recipient_name="Interconnection team",
+        recipient_contact="interconnections@example.test",
+        internal_notes="Submit through the utility portal.",
+    )
+    assert updated["recipient_contact"] == "interconnections@example.test"
+    approved = service.approve_rfi(project["project_id"], draft["rfi_id"], "Project lead")
+    assert approved["status"] == "APPROVED" and approved["human_approval_required"] is False
+    sent = service.mark_rfi_sent(
+        project["project_id"], draft["rfi_id"], "Project lead", "Utility portal request 123",
+    )
+    assert sent["status"] == "SENT"
+
+    memory = ProjectMemoryStore(store)
+    monkeypatch.setattr(main, "diligence_service", service)
+    monkeypatch.setattr(main, "project_memory", memory)
+    response = TestClient(main.app).post(
+        f"/v1/diligence/projects/{project['project_id']}/rfis/{draft['rfi_id']}/response",
+        json={
+            "details": "The utility acknowledged the request but has not confirmed available capacity.",
+            "provider": "Serving utility",
+            "source_url": "https://utility.example.test/request/123",
+            "source_type": "email",
+        },
+    )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["rfi"]["status"] == "RESPONSE_RECEIVED"
+    assert result["evidence"]["status"] == "PENDING_REVIEW"
+    assert memory.list(project["project_id"], MemoryKind.EVIDENCE)[0].provenance["rfi_id"] == draft["rfi_id"]
+    reloaded = service.get(project["project_id"])
+    power = next(
+        item for item in reloaded["project_intelligence"]["evidence_coverage"]
+        if item["requirement_id"] == "bess_export_interconnection"
+    )
+    assert power["status"] == "UNRESOLVED" and power["decision_provable"] is False
+    refreshed_action = next(
+        item for item in reloaded["project_intelligence"]["recommended_actions"]
+        if item["action_id"] == action["action_id"]
+    )
+    assert refreshed_action["status"] == "RESPONSE_RECEIVED"
+
+
 def test_phase10_agent_generates_rfi_wording_for_validated_action(diligence):
     service, _client, _store = diligence
     project = _phase10_blocked_project(service, "workspace-phase10-agent-rfi")
@@ -1023,6 +1147,74 @@ def test_phase10_agent_explains_unresolved_requirement_from_structured_state(dil
 
     assert response["tool_trace"][0]["tool"] == "get_project_intelligence"
     assert "export/injection capacity is missing" in response["message"]
+
+
+def test_phase10_agent_accepts_grounded_domain_level_unresolved_wording(diligence):
+    service, _client, _store = diligence
+    project = _phase10_blocked_project(service, "workspace-phase10-domain-wording")
+    message = "Power is UNRESOLVED because utility-confirmed export and injection capacity is missing."
+    model = ScriptedModel([
+        tool("get_project_intelligence", {"project_id": project["project_id"]}, "intelligence"),
+        ModelReply(message=message, tool_calls=[], response_items=[]),
+    ])
+
+    response = run(SandboxAgent(model=model, diligence=service).chat_project(project["project_id"], "phase10-domain", "Why is power blocked?"))
+
+    assert response["message"] == (
+        "Power has mixed requirement outcomes: Transmission proximity is PASS; "
+        "100 MW export / injection interconnection is UNRESOLVED."
+    )
+
+
+def test_user_evidence_is_durable_ai_memory_but_stays_pending_review(monkeypatch, diligence):
+    service, _client, store = diligence
+    project = _phase10_blocked_project(service, "workspace-user-evidence")
+    site_id = project["project_intelligence"]["active_site"]["site_id"]
+    memory = ProjectMemoryStore(store)
+    monkeypatch.setattr(main, "diligence_service", service)
+    monkeypatch.setattr(main, "project_memory", memory)
+    client = TestClient(main.app)
+    payload = {
+        "requirement_id": "bess_export_interconnection",
+        "title": "Utility feasibility email",
+        "details": "The utility confirmed receipt of the 100 MW interconnection request; capacity is not yet confirmed.",
+        "provider": "Serving utility",
+        "source_url": "https://utility.example.test/request/123",
+        "source_type": "email",
+    }
+
+    response = client.post(
+        f"/v1/diligence/projects/{project['project_id']}/sites/{site_id}/user-evidence",
+        json=payload,
+    )
+
+    assert response.status_code == 200
+    evidence = response.json()["evidence"]
+    assert evidence["status"] == "PENDING_REVIEW"
+    assert evidence["human_review_required"] is True
+    reloaded = service.get(project["project_id"])
+    assert reloaded["user_evidence_by_site"][site_id][0]["evidence_id"] == evidence["evidence_id"]
+    power = next(
+        item for item in reloaded["project_intelligence"]["evidence_coverage"]
+        if item["requirement_id"] == "bess_export_interconnection"
+    )
+    assert power["status"] == "UNRESOLVED" and power["decision_provable"] is False
+    records = memory.list(project["project_id"], MemoryKind.EVIDENCE)
+    assert records[0].content["details"] == payload["details"]
+    assert service.user_evidence(project["project_id"])["pending_review"] == 1
+    model = ScriptedModel([
+        tool("get_user_evidence", {"project_id": project["project_id"]}, "user evidence"),
+        ModelReply(
+            message="The utility email is saved as user-supplied evidence and remains pending source and scope review.",
+            tool_calls=[],
+            response_items=[],
+        ),
+    ])
+    answer = run(SandboxAgent(model=model, diligence=service).chat_project(
+        project["project_id"], "user-evidence-chat", "What evidence did I add?",
+    ))
+    assert answer["tool_trace"][0]["tool"] == "get_user_evidence"
+    assert "pending source and scope review" in answer["message"]
 
 
 def test_phase10_agent_cannot_invent_pass_fail_result(diligence):

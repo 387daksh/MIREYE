@@ -112,9 +112,12 @@ export default function ProjectPage() {
             </div>
           </MapWorkspace>
           <IntelligencePanel state={state}>
-            <ProjectSections state={state} projectId={projectId} />
+            <ProjectSections state={state} projectId={projectId} onRefresh={() => project.refetch()} />
             <SiteSections
               workspaceId={state.workspace_id ? String(state.workspace_id) : undefined}
+              projectId={projectId}
+              candidateId={String(selected?.candidate_id)}
+              onRefresh={() => project.refetch()}
             />
           </IntelligencePanel>
         </div>

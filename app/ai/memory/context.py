@@ -92,7 +92,7 @@ class TaskContextBuilder:
             "apn": reconciliation.get("apn") or candidate.get("apn"),
             "canonical_address": reconciliation.get("canonical_address") or (candidate.get("summary") or {}).get("title"),
             "site_snapshot_id": active.get("site_snapshot_id") or candidate.get("snapshot_id"),
-            "match_type": reconciliation.get("match_type"),
+            "match_type": reconciliation.get("match_type") or candidate.get("parcel_match_type"),
             "geometry_reference": active.get("site_snapshot_id") or candidate.get("snapshot_id"),
             "source": "MIREYE",
             "authority_level": "DIRECTLY_VERIFIED",

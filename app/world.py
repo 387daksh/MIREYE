@@ -34,6 +34,7 @@ TERRAIN_TILE_PYRAMID_VERSION = "aoi_tile_cover_v2"
 DEFAULT_OVERTURE_RELEASE = "2026-08-19.0"
 OVERTURE_BUILD_TIMEOUT_SECONDS = 240
 OVERTURE_RELEASE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}\.\d+$")
+OVERTURE_STAC_INDEX = "https://stac.overturemaps.org/{release}/collections.parquet"
 USGS_PRODUCTS_URL = "https://tnmaccess.nationalmap.gov/api/v1/products"
 USGS_ELEVATION_EXPORT_URL = "https://elevation.nationalmap.gov/arcgis/rest/services/3DEPElevation/ImageServer/exportImage"
 WEB_MERCATOR_LIMIT = 20037508.342789244
@@ -322,8 +323,8 @@ class OvertureRoadProvider:
 
     @staticmethod
     def _build_sync(aoi: dict, artifacts: ArtifactStore, release: str) -> dict:
-        path = f"s3://overturemaps-us-west-2/release/{release}/theme=transportation/type=segment/*"
         bbox = aoi["bbox"]
+        paths = _overture_paths(release, "segment", bbox)
         connection = duckdb.connect()
         try:
             connection.execute("INSTALL httpfs")
@@ -338,7 +339,7 @@ class OvertureRoadProvider:
                   AND bbox.ymin <= ? AND bbox.ymax >= ?
                 ORDER BY id
                 """,
-                [path, bbox[2], bbox[0], bbox[3], bbox[1]],
+                [paths, bbox[2], bbox[0], bbox[3], bbox[1]],
             ).fetch_arrow_table()
         finally:
             connection.close()
@@ -352,7 +353,7 @@ class OvertureRoadProvider:
             "layer": "roads", "availability": "AVAILABLE", "quality_state": "VERIFIED_SOURCE",
             "source": {
                 "provider": "Overture Maps Foundation", "release": release, "schema_theme": "transportation/segment",
-                "source_uri": path, "license": "ODbL-1.0", "attribution": "OpenStreetMap contributors, Overture Maps Foundation",
+                "source_uri": paths, "license": "ODbL-1.0", "attribution": "OpenStreetMap contributors, Overture Maps Foundation",
             },
             "artifacts": {"source_geoparquet": source_artifact, "render_geojson": render_artifact},
             "roads": {"feature_count": len(geojson["features"]), "geometry": "source LineString; AOI-clipped render geometry", "identity_field": "GERS id"},
@@ -374,6 +375,27 @@ def _polygon_geojson(table, bbox: list[float], properties: list[str]) -> dict:
     return {"type": "FeatureCollection", "features": features}
 
 
+def _overture_paths(release: str, source_type: str, bbox: list[float]) -> list[str]:
+    response = httpx.get(OVERTURE_STAC_INDEX.format(release=release), timeout=30)
+    response.raise_for_status()
+    index = pq.read_table(io.BytesIO(response.content), columns=["collection", "type", "bbox", "assets"])
+    paths = []
+    for row in index.to_pylist():
+        bounds = row["bbox"]
+        if (
+            row["collection"] == source_type
+            and row["type"] == "Feature"
+            and bounds["xmin"] < bbox[2]
+            and bounds["xmax"] > bbox[0]
+            and bounds["ymin"] < bbox[3]
+            and bounds["ymax"] > bbox[1]
+        ):
+            paths.append(row["assets"]["aws"]["href"])
+    if not paths:
+        raise WorldError(f"Overture STAC index found no {source_type} files for the AOI.")
+    return paths
+
+
 class OvertureBuildingProvider:
     @traced_async("source.overture.buildings")
     async def build(self, aoi: dict, artifacts: ArtifactStore, options: dict) -> dict:
@@ -384,8 +406,8 @@ class OvertureBuildingProvider:
 
     @staticmethod
     def _build_sync(aoi: dict, artifacts: ArtifactStore, release: str) -> dict:
-        path = f"s3://overturemaps-us-west-2/release/{release}/theme=buildings/type=building/*"
         bbox = aoi["bbox"]
+        paths = _overture_paths(release, "building", bbox)
         connection = duckdb.connect()
         try:
             connection.execute("INSTALL httpfs")
@@ -400,7 +422,7 @@ class OvertureBuildingProvider:
                   AND bbox.ymin <= ? AND bbox.ymax >= ?
                 ORDER BY id
                 """,
-                [path, bbox[2], bbox[0], bbox[3], bbox[1]],
+                [paths, bbox[2], bbox[0], bbox[3], bbox[1]],
             ).fetch_arrow_table()
         finally:
             connection.close()
@@ -414,7 +436,7 @@ class OvertureBuildingProvider:
             "layer": "buildings", "availability": "AVAILABLE", "quality_state": "VERIFIED_SOURCE",
             "source": {
                 "provider": "Overture Maps Foundation", "release": release,
-                "schema_theme": "buildings/building", "source_uri": path,
+                "schema_theme": "buildings/building", "source_uri": paths,
                 "license": "ODbL-1.0", "attribution": "Overture Maps Foundation and source contributors",
             },
             "artifacts": {"source_geoparquet": source_artifact, "render_geojson": render_artifact},
@@ -439,8 +461,8 @@ class OverturePolygonProvider:
         return await asyncio.to_thread(self._build_sync, aoi, artifacts, release)
 
     def _build_sync(self, aoi: dict, artifacts: ArtifactStore, release: str) -> dict:
-        path = f"s3://overturemaps-us-west-2/release/{release}/theme=base/type={self.source_type}/*"
         bbox = aoi["bbox"]
+        paths = _overture_paths(release, self.source_type, bbox)
         connection = duckdb.connect()
         try:
             connection.execute("INSTALL httpfs")
@@ -454,7 +476,7 @@ class OverturePolygonProvider:
                   AND bbox.ymin <= ? AND bbox.ymax >= ?
                 ORDER BY id
                 """,
-                [path, bbox[2], bbox[0], bbox[3], bbox[1]],
+                [paths, bbox[2], bbox[0], bbox[3], bbox[1]],
             ).fetch_arrow_table()
         finally:
             connection.close()
@@ -468,7 +490,7 @@ class OverturePolygonProvider:
             "layer": self.layer, "availability": "AVAILABLE", "quality_state": "VERIFIED_SOURCE",
             "source": {
                 "provider": "Overture Maps Foundation", "release": release,
-                "schema_theme": f"base/{self.source_type}", "source_uri": path,
+                "schema_theme": f"base/{self.source_type}", "source_uri": paths,
                 "license": "ODbL-1.0", "attribution": "Overture Maps Foundation and source contributors",
             },
             "artifacts": {"source_geoparquet": source_artifact, "render_geojson": render_artifact},
@@ -519,7 +541,12 @@ class WorldSnapshotService:
             roads = existing.get("roads")
             requested_release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
             try:
-                built.append(roads if roads and roads.get("source", {}).get("release") == requested_release else await self.road_provider.build(query_aoi, self.artifacts, options))
+                reusable = (
+                    roads
+                    and roads.get("availability") == "AVAILABLE"
+                    and roads.get("source", {}).get("release") == requested_release
+                )
+                built.append(roads if reusable else await self.road_provider.build(query_aoi, self.artifacts, options))
             except (WorldError, duckdb.Error, httpx.HTTPError) as exc:
                 built.append({
                     "layer": "roads", "availability": "UNAVAILABLE", "quality_state": "SOURCE_UNAVAILABLE",
@@ -536,7 +563,11 @@ class WorldSnapshotService:
             current = existing.get(layer_name)
             requested_release = options.get("overture_release", DEFAULT_OVERTURE_RELEASE)
             try:
-                if current and current.get("source", {}).get("release") == requested_release:
+                if (
+                    current
+                    and current.get("availability") == "AVAILABLE"
+                    and current.get("source", {}).get("release") == requested_release
+                ):
                     return current
                 return await asyncio.wait_for(
                     provider.build(query_aoi, self.artifacts, options),

@@ -1,5 +1,6 @@
 services:
   frontend:
+    restart: unless-stopped
     build:
       context: ./frontend
       args:
@@ -11,6 +12,7 @@ services:
     depends_on: { api: { condition: service_healthy } }
     healthcheck: { test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:3000/ >/dev/null"], interval: 10s, timeout: 5s, retries: 12 }
   api:
+    restart: unless-stopped
     build: .
     command: sh -c "alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port 8000"
     environment:
@@ -40,6 +42,7 @@ services:
       minio-init: { condition: service_completed_successfully }
     healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready')"], interval: 10s, timeout: 5s, retries: 18 }
   worker:
+    restart: unless-stopped
     build: .
     command: python scripts/temporal_worker.py
     environment:
@@ -62,6 +65,7 @@ services:
     depends_on: { api: { condition: service_healthy }, temporal: { condition: service_healthy } }
     healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8091/health/ready')"], interval: 10s, timeout: 5s, retries: 12 }
   event-publisher:
+    restart: unless-stopped
     build: .
     command: python scripts/event_worker.py
     environment:
@@ -71,6 +75,7 @@ services:
     depends_on: { api: { condition: service_healthy }, postgres: { condition: service_healthy }, nats: { condition: service_healthy } }
     healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8092/health/ready')"], interval: 10s, timeout: 5s, retries: 12 }
   event-consumer:
+    restart: unless-stopped
     build: .
     command: python scripts/event_consumer.py
     environment:
@@ -80,34 +85,40 @@ services:
     depends_on: { api: { condition: service_healthy }, postgres: { condition: service_healthy }, nats: { condition: service_healthy } }
     healthcheck: { test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8093/health/ready')"], interval: 10s, timeout: 5s, retries: 12 }
   postgres:
+    restart: unless-stopped
     build: ./infra/postgres
     environment: { POSTGRES_DB: mireye, POSTGRES_USER: mireye, POSTGRES_PASSWORD: mireye }
     ports: ["5432:5432"]
     volumes: ["postgres_data:/var/lib/postgresql/data"]
     healthcheck: { test: ["CMD-SHELL", "pg_isready -U mireye -d mireye"], interval: 5s, timeout: 5s, retries: 12 }
   redis:
+    restart: unless-stopped
     image: redis:7.4-alpine
     ports: ["6379:6379"]
     healthcheck: { test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 12 }
   nats:
+    restart: unless-stopped
     image: nats:2.10-alpine
     command: ["-js", "-m", "8222", "-sd", "/data"]
     ports: ["4222:4222", "8222:8222"]
     volumes: ["nats_data:/data"]
     healthcheck: { test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8222/healthz >/dev/null"], interval: 5s, timeout: 3s, retries: 12 }
   temporal:
+    restart: unless-stopped
     image: temporalio/auto-setup:1.27.2
     environment: { DB: postgres12, DB_PORT: 5432, POSTGRES_SEEDS: postgres, POSTGRES_USER: mireye, POSTGRES_PWD: mireye }
     ports: ["7233:7233"]
     depends_on: { postgres: { condition: service_healthy } }
     healthcheck: { test: ["CMD", "temporal", "operator", "cluster", "health", "--address", "temporal:7233"], interval: 10s, timeout: 5s, retries: 30 }
   temporal-ui:
+    restart: unless-stopped
     image: temporalio/ui:2.34.0
     environment: { TEMPORAL_ADDRESS: temporal:7233 }
     ports: ["8080:8080"]
     depends_on: { temporal: { condition: service_healthy } }
     healthcheck: { test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:8080/ >/dev/null"], interval: 10s, timeout: 5s, retries: 18 }
   minio:
+    restart: unless-stopped
     image: minio/minio:RELEASE.2025-04-22T22-12-26Z
     command: server /data --console-address :9001
     environment: { MINIO_ROOT_USER: minioadmin, MINIO_ROOT_PASSWORD: minioadmin }
