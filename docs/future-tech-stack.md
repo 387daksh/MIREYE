@@ -7,14 +7,7 @@ MIREYE Site Sandbox is an evidence-grounded workspace for physical-site diligenc
 It is not a generic GIS viewer, a parcel-data warehouse, an architecture application, or a generative 3D demo. A user supplies a real property or a candidate list, describes a project in normal language, and the product plans evidence collection, asks for approval before metered MIREYE work, preserves immutable evidence, evaluates only what can be proven, and supports conceptual alternatives.
 
 ```text
-Plain-English project brief
-        -> candidate list or selected property
-        -> MIREYE identity, field planning, quote, enrichment
-        -> immutable SiteSnapshot
-        -> WorldSnapshot with source-backed spatial context
-        -> deterministic evaluation and conceptual scenarios
-        -> comparison, refresh, invalidation, replay
-```
+
 
 ## Stack today
 
